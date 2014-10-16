@@ -402,7 +402,7 @@ typedef unsigned long long     u8;
 typedef uintptr_t ConstantPoolEntry;
 
 typedef struct constant_pool {
-    volatile u1 *type;
+    volatile u1 *type; // u1[size of constant pool]，记录每个条目的类型(tag)
     ConstantPoolEntry *info;
 } ConstantPool;
 

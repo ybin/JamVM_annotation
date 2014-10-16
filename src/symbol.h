@@ -23,7 +23,34 @@
 extern char *symbol_values[];
 #define SYMBOL_NAME_ENUM(name) symbol_##name
 #define SYMBOL(name) symbol_values[SYMBOL_NAME_ENUM(name)]
+/*
+  symbol_values[]是个数组，那么SYMBOL_NAME_ENUM(name)的结果必然是一个整数索引，
+  比如，
+  SYMBOL(java_lang_ClassLoader)
+  展开之后就是
+  symbol_values[symbol_java_lang_ClassLoader]
+  而根据symbol.h中定义的枚举类型
+  enum {
+    CLASSLIB_SYMBOLS_DO(SYMBOL_ENUM),
+    SYMBOLS_DO(SYMBOL_ENUM),
+    MAX_SYMBOL_ENUM
+  }; 
+  可见，symbol_xxx均为枚举常量，也就是一些整数值。
 
+  SYMBOL宏最终得到的是name的字符串表示，它得到一个字符串。
+  如SYMBOL(java_lang_ClassLoader) => "java/lang/ClassLoader"
+*/
+
+/*
+  SYMBOLS_DO这个宏会根据action产生不同的结果，
+  实际使用中，action其实也是宏，action可以生成name，也可以取得value，
+  如，
+  #define SYMBOL_NAME_ENUM(name) symbol_##name
+  这个宏在生成name的同时在每个name前添加一个"symbol_"字符串
+  而，
+  #define SYMBOL_VALUE(name, value) value
+  这个宏只是取得value部分，action可以是这两个宏里的一个。
+*/
 #define SYMBOLS_DO(action) \
     /* Method and field names, etc. */\
     action(I, "I"), \

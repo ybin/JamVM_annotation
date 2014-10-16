@@ -117,6 +117,7 @@ FieldBlock *lookupField(Class *class, char *fieldname, char *fieldtype) {
     return NULL;
 }
 
+
 Class *resolveClass(Class *class, int cp_index, int check_access, int init) {
     ConstantPool *cp = &(CLASS_CB(class)->constant_pool);
     Class *resolved_class = NULL;

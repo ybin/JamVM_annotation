@@ -45,8 +45,11 @@
 #define FOUND(ptr1, ptr2) ptr2
 
 static int verbose;
+// boot class path字符串表示，用":"分割
 static char *bootpath;
+// class path的字符串表示，用":"分割
 static char *classpath;
+// class path中文件夹格式个路径的最大长度
 static int max_cp_element_len;
 
 /* Structures holding the boot loader classpath */
@@ -55,7 +58,9 @@ typedef struct bcp_entry {
     ZipFile *zip;
 } BCPEntry;
 
+// boot class path的BCPEntry表示
 static BCPEntry *bootclasspath;
+// boot class path的BCPEntry表示的数量
 static int bcp_entries;
 
 /* Cached offsets of fields in java.lang.ref.Reference objects */
@@ -104,12 +109,13 @@ static Class *addClassToHash(Class *class, Object *class_loader) {
 #define HASH(ptr) utf8Hash(CLASS_CB((Class *)ptr)->name)
 #define COMPARE(ptr1, ptr2, hash1, hash2) (hash1 == hash2) && \
             CLASS_CB((Class *)ptr1)->name == CLASS_CB((Class *)ptr2)->name
-
+	// 如果class loader为NULL就用boot class hashtable
     if(class_loader == NULL)
         table = &boot_classes;
     else {
+		// 否则根据class loader查找hashtable
         table = classlibLoaderTable(class_loader);
-
+		// 如果该class loader还没有hashtable就创建它
         if(table == NULL) {
             table = classlibCreateLoaderTable(class_loader);
 
@@ -127,10 +133,14 @@ static Class *addClassToHash(Class *class, Object *class_loader) {
 static void prepareClass(Class *class) {
     ClassBlock *cb = CLASS_CB(class);
 
+	// 如果这个class object的名字是"java/lang/Class"，
+	// 那么它的Class对象就是它自己,并且增加一个flag以示说明。
     if(cb->name == SYMBOL(java_lang_Class)) {
        java_lang_Class = class->class = class;
        cb->flags |= CLASS_CLASS;
     } else {
+    // 否则，如Integer Class object，那么它的Class对象就是
+    // java.lang.Class对象，而系统中只需存在一份java.lang.Class对象即可。
        if(java_lang_Class == NULL)
           findSystemClass0(SYMBOL(java_lang_Class));
        class->class = java_lang_Class;
@@ -238,9 +248,44 @@ static void setIndexedAttributeData(AttributeData ***attributes,
     attributes->data = sysMalloc(length);            \
     memcpy(attributes->data, pntr, length);
 
+/*
+	data:	从.class文件中读取出来的文件内容
+	offset:	类的内容在文件中的偏移，一般为0
+	len:	类的内容的长度，一般为.class文件的长度
+
+	内存中的类长什么样子呢?
+	
+		    Class * -->	+-----------------------+
+						| header| lock (4 bytes)|
+						|		| Class * (ptr) |
+	   ClassBlock * -->	+-----------------------+
+						|	ClassBlock object	|
+						|    ( mass of mem )	|
+						+-----------------------+
+
+	.class文件中的类长什么样子呢?
+	
+	类文件 {
+		0xCAFEBABE，
+		小版本号，
+		大版本号，
+		常量池大小，
+		常量池数组，
+		访问控制标记，
+		当前类信息，
+		父类信息，
+		实现的接口个数，
+		实现的接口信息数组，
+		域个数，
+		域信息数组，
+		方法个数，
+		方法信息数组，
+		属性个数，
+		属性信息数组
+	}
+*/
 Class *parseClass(char *classname, char *data, int offset, int len,
                    Object *class_loader) {
-
     u2 major_version, minor_version, this_idx, super_idx, attr_count;
     int cp_count, intf_count, injected_fields_count, i, j;
     ExtraAttributes extra_attributes;
@@ -250,6 +295,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
     ClassBlock *classblock;
     u4 magic;
 
+	// 读取magic number，保存到magic变量中
     READ_U4(magic, ptr, len);
 
     if(magic != 0xcafebabe) {
@@ -257,19 +303,25 @@ Class *parseClass(char *classname, char *data, int offset, int len,
        return NULL;
     }
 
+	// 读取主、副版本号
     READ_U2(minor_version, ptr, len);
     READ_U2(major_version, ptr, len);
 
+	// 为Class对象分配内存，可能因为GC
     if((class = allocClass()) == NULL)
         return NULL;
 
+	// classblock指向classblock对象，见上面的图示
     classblock = CLASS_CB(class);
     READ_U2(cp_count, ptr, len);
 
+	// 在内存中创建常量池
     constant_pool = &classblock->constant_pool;
     constant_pool->type = sysMalloc(cp_count);
     constant_pool->info = sysMalloc(cp_count * sizeof(ConstantPoolEntry));
 
+	// 解析常量池，每一种类型，不论是CONSTANT_Class还是CONSTANT_MethodType，
+	// 所有类型都是以一个u1类型的tag开始的，以表示其类型
     for(i = 1; i < cp_count; i++) {
         u1 tag;
 
@@ -280,6 +332,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
            case CONSTANT_Class:
            case CONSTANT_String:
            case CONSTANT_MethodType:
+		   	   // tag后面紧跟的就是其在常量池中的index
                READ_INDEX(CP_INFO(constant_pool, i), ptr, len);
                break;
 
@@ -366,6 +419,15 @@ Class *parseClass(char *classname, char *data, int offset, int len,
         return NULL;
     }
 
+	/*
+		 设置class对象的class对象，
+		 比如加载Integer这个Class之后会创建一个Integer Class object，
+		 这个object是一个Class<Integer>类型的对象，它作为对象也有自己
+		 的Class对象，那就是java.lang.Class对象，而java.lang.Class对象
+		 也有自己的Class对象，它是什么呢，它就是它自己!
+		 
+		 prepareClass()就是完成这件事情的.
+	*/
     prepareClass(class);
 
     if(classblock->name == SYMBOL(java_lang_Object)) {
@@ -380,6 +442,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
 
     classblock->class_loader = class_loader;
 
+	// 处理 interfaces
     READ_U2(intf_count = classblock->interfaces_count, ptr, len);
     interfaces = classblock->interfaces =
                          sysMalloc(intf_count * sizeof(Class *));
@@ -393,8 +456,8 @@ Class *parseClass(char *classname, char *data, int offset, int len,
            return NULL; 
     }
 
+	// 处理 fields
     memset(&extra_attributes, 0, sizeof(ExtraAttributes));
-
     READ_U2(classblock->fields_count, ptr, len);
     injected_fields_count = classlibInjectedFieldsCount(classblock->name);
     classblock->fields_count += injected_fields_count;
@@ -461,6 +524,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
         }
     }
 
+	// 处理 methods
     READ_U2(classblock->methods_count, ptr, len);
     classblock->methods = sysMalloc(classblock->methods_count *
                                     sizeof(MethodBlock));
@@ -494,6 +558,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
                 u2 code_attr_cnt;
                 int j;
 
+				// 每个method所占用的stack size和local variable size都是固定的
                 READ_U2(method->max_stack, ptr, len);
                 READ_U2(method->max_locals, ptr, len);
 
@@ -504,6 +569,8 @@ Class *parseClass(char *classname, char *data, int offset, int len,
 
                 method->code_size = code_length;
 
+				// 每个method，如果有异常处理，那么其exception table就会紧跟其
+				// Code被保存在.class文件中。exception，本质上就是goto啊
                 READ_U2(method->exception_table_size, ptr, len);
                 method->exception_table =
                         sysMalloc(method->exception_table_size *
@@ -517,6 +584,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
                     READ_U2(entry->catch_type, ptr, len);
                 }
 
+				// code也可以有其attribute，如line number(行号)
                 READ_U2(code_attr_cnt, ptr, len);
                 for(; code_attr_cnt != 0; code_attr_cnt--) {
                     u2 attr_name_idx;
@@ -597,6 +665,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
         }
     }
 
+	// 处理 attributes
     READ_U2(attr_count, ptr, len);
     for(; attr_count != 0; attr_count--) {
         u2 attr_name_idx;
@@ -721,6 +790,7 @@ Class *parseClass(char *classname, char *data, int offset, int len,
                                              sizeof(ExtraAttributes));
     }
 
+	// 处理 super class
     if(super_idx) {
         classblock->super = resolveClass(class, super_idx, FALSE, FALSE);
         if(exceptionOccurred())
@@ -734,8 +804,11 @@ Class *parseClass(char *classname, char *data, int offset, int len,
 Class *defineClass(char *classname, char *data, int offset, int len,
                    Object *class_loader) {
 
+	// 从字符串数组中创建Class对象，这是load过程的关键所在
+	// 注意，该类所依赖的类也一并加载了
     Class *class = parseClass(classname, data, offset, len, class_loader);
 
+	// 将Class对象缓存起来
     if(class != NULL) {
         Class *found = addClassToHash(class, class_loader);
 
@@ -1608,6 +1681,7 @@ void defineBootPackage(char *classname, int index) {
     char *last_slash = strrchr(classname, '/');
 
     if(last_slash != NULL && last_slash != classname) {
+		// 指针操作，package name的长度
         int len = last_slash - classname + 1;
         PackageEntry *package = sysMalloc(sizeof(PackageEntry) + len);
         PackageEntry *hashed;
@@ -1637,9 +1711,11 @@ Class *loadSystemClass(char *classname) {
     char *data = NULL;
     int i;
 
+	// 根据class name生成.class文件名
     filename[0] = '/';
     strcat(strcpy(&filename[1], classname), ".class");
 
+	// 在bootclasspath所记录的路径中查找类，并fread到内存中
     for(i = 0; i < bcp_entries && data == NULL; i++)
         if(bootclasspath[i].zip)
             data = findArchiveEntry(filename + 1, bootclasspath[i].zip,
@@ -1653,10 +1729,12 @@ Class *loadSystemClass(char *classname) {
         return NULL;
     }
 
+	// 将类所在的package name缓存起来(放到hash table中)
     /* If this class belongs to a package not yet seen add it
        to the list of bootloader packages */
     defineBootPackage(classname, i - 1);
 
+	// 由二进制转变为Class对象
     class = defineClass(classname, data, 0, file_len, NULL);
     sysFree(data);
 
@@ -1685,6 +1763,8 @@ Class *findHashedClass(char *classname, Object *class_loader) {
     if((name = findUtf8(classname)) == NULL)
         return NULL;
 
+	// 根据class loader选择不同的hash table，每个class loader都有自己的hash table，
+	// 于是每个class loader都形成了各自的命名空间
     if(class_loader == NULL)
         table = &boot_classes;
     else
@@ -1704,11 +1784,14 @@ Class *findHashedClass(char *classname, Object *class_loader) {
 }
 
 Class *findSystemClass0(char *classname) {
+	// 先从已加载的类中查找
    Class *class = findHashedClass(classname, NULL);
 
+	// ***类的 加载***
    if(class == NULL)
        class = loadSystemClass(classname);
 
+	// ***类的 链接***
    if(!exceptionOccurred())
        linkClass(class);
 
@@ -1716,8 +1799,12 @@ Class *findSystemClass0(char *classname) {
 }
 
 Class *findSystemClass(char *classname) {
+	// 类的加载机制分为三部分: 加载、链接、初始化。
+	
+	// 取得类对象，这里涉及到"类的加载"
    Class *class = findSystemClass0(classname);
 
+	// ***类的 初始化***
    if(!exceptionOccurred())
        initClass(class);
 
@@ -1880,13 +1967,17 @@ Class *findClassFromClassLoader(char *classname, Object *loader) {
 }
 
 Object *getSystemClassLoader() {
+	// 获取java.lang.ClassLoader类对象
+	// e.g. findSystemClass("java/lang/ClassLoader")
     Class *class_loader = findSystemClass(SYMBOL(java_lang_ClassLoader));
 
+	// 获取getSystemClassLoader()函数对象
     if(!exceptionOccurred()) {
         MethodBlock *mb = findMethod(class_loader,
                                      SYMBOL(getSystemClassLoader),
                                      SYMBOL(___java_lang_ClassLoader));
 
+		// 执行java.lang.ClassLoader.getSystemClassLoader()，得到最终的class loader对象
         if(mb != NULL) {
             Object *loader = *(Object**)executeStaticMethod(class_loader, mb);
 
@@ -2149,6 +2240,7 @@ void parseBootClassPath() {
     if(start != pntr)
         i++;
 
+	// i 表示以":"分割的路径数目
     bootclasspath = sysMalloc(sizeof(BCPEntry)*i);
 
     for(j = 0, pntr = cp; i > 0; i--) {
@@ -2339,9 +2431,21 @@ out:
 int initialiseClassStage1(InitArgs *args) {
     verbose = args->verboseclass;
 
+	// 设置classpath变量:
+	// 首先读取args里的值，如果没有就读取'CLASSPATH'环境变量的值，如果还没有就设置为当前路径('.')
     setClassPath(args);
+	/* 设置bootpath变量
+	   依次这样读取值:
+	     1. 读取args中的值
+	     2. 读取"sun.boot.class.path"命令行参数的值
+	     3. 读取"java.boot.class.path"命令行参数的值
+	     4. 读取"BOOTCLASSPATH"环境变量的值
+	     5. 读取具体classlib(e.g. OpenJDK, Gnu Path)中设置的值***
+	     6. 如果有append类型或者prefix类型则一并设置
+	*/ 
     setBootClassPath(args);
 
+	// 构建BCPEntry形式的boot class path
     parseBootClassPath();
 
     /* Init hash table, and create lock for the bootclassloader classes */

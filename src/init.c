@@ -189,6 +189,7 @@ static CompatOptions compat[] = {
     {NULL, 0}
 };
 
+// 解析字符串并将结果保存到args对象中
 int parseCommonOpts(char *string, InitArgs *args, int is_jni) {
     int status = OPT_OK;
 
@@ -197,7 +198,7 @@ int parseCommonOpts(char *string, InitArgs *args, int is_jni) {
 
     else if(strncmp(string, "-Xms", 4) == 0 ||
             (!is_jni && strncmp(string, "-ms", 3) == 0)) {
-
+        // 设置heap的最小值
         char *value = string + (string[1] == 'm' ? 3 : 4);
         args->min_heap = parseMemValue(value);
 
@@ -209,7 +210,7 @@ int parseCommonOpts(char *string, InitArgs *args, int is_jni) {
 
     } else if(strncmp(string, "-Xmx", 4) == 0 ||
               (!is_jni && strncmp(string, "-mx", 3) == 0)) {
-
+		// 设置heap的最大值
         char *value = string + (string[1] == 'm' ? 3 : 4);
         args->max_heap = parseMemValue(value);
 
@@ -221,7 +222,7 @@ int parseCommonOpts(char *string, InitArgs *args, int is_jni) {
 
     } else if(strncmp(string, "-Xss", 4) == 0 ||
               (!is_jni && strncmp(string, "-ss", 3) == 0)) {
-
+		// 设置stack size
         char *value = string + (string[1] == 'm' ? 3 : 4);
         args->java_stack = parseMemValue(value);
 
@@ -232,6 +233,7 @@ int parseCommonOpts(char *string, InitArgs *args, int is_jni) {
         }
 
     } else if(strncmp(string, "-D", 2) == 0) {
+    	// 设置环境变量(属性)值
         char *key = strcpy(sysMalloc(strlen(string + 2) + 1), string + 2);
         char *pntr;
 
@@ -242,13 +244,16 @@ int parseCommonOpts(char *string, InitArgs *args, int is_jni) {
         args->commandline_props[args->props_count++].value = pntr;
 
     } else if(strncmp(string, "-Xbootclasspath:", 16) == 0) {
+    	// 设置boot class path
         args->bootpath = string + 16;
         args->bootpath_p = args->bootpath_a = NULL;
 
     } else if(strncmp(string, "-Xbootclasspath/a:", 18) == 0) {
+    	// 设置class path并将其append到boot class path后面
         args->bootpath_a = string + 18;
 
     } else if(strncmp(string, "-Xbootclasspath/p:", 18) == 0) {
+    	// 设置class path并将其prefix到boot class path前面
         args->bootpath_p = string + 18;
 
     } else if(strcmp(string, "-Xnocompact") == 0) {

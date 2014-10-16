@@ -122,7 +122,9 @@ void showFullVersion() {
     printf("java full version \"jamvm-%s\"\n", JAVA_COMPAT_VERSION);
 }
 
+// 解析argv[]并设置相关数据到args对象中，这部分可以参考(Oracle) java.exe的用法，他们是兼容的。
 int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+	// 键值对
     Property props[argc-1];
     int is_jar = FALSE;
     int status = 0;
@@ -131,6 +133,10 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
     args->commandline_props = &props[0];
 
     for(i = 1; i < argc; i++) {
+		// 对于具体的选项，都是以'-'开头，所以不是以'-'开头的参数就是VM要执行的class name。
+		// jamvm -option value -option value ... <qualified class name>
+		// e.g.
+		// jamvm -d32 -client com.example.MainClass
         if(*argv[i] != '-') {
             if(args->min_heap > args->max_heap) {
                 printf("Minimum heap size greater than max!\n");
@@ -138,6 +144,7 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
                 goto exit;
             }
 
+			// 保存property值，注意: class name一定要放到最后，否则后面的参数就无法解析了。
             if(args->props_count) {
                 args->commandline_props = sysMalloc(args->props_count *
                                                     sizeof(Property));
@@ -145,14 +152,23 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
                                                            sizeof(Property));
             }
 
+			// class name不一定是class，也可以是可执行的jar文件名
             if(is_jar) {
                 args->classpath = argv[i];
                 argv[i] = "jamvm/java/lang/JarLauncher";
             }
 
+			// 最后返回class name在argv[]中对应的索引
             return i;
         }
 
+		/* 参数有几种不同的格式:
+		   1. 开关类型的。如-client, -d64, -help, -version等
+		   2. 参数名紧跟值类型的。如-verbose:[class|gc|jni], -splash:<imagepath>等
+		   3. 参数名+空格+值类型的。如-cp "xxx"，这种类型解析时i会自动增加
+
+		   所以，结论就是每轮for循环，如果参数不是以'-'开头，那么该参数一定是class name。
+		*/
         switch(parseCommonOpts(argv[i], args, FALSE)) {
             case OPT_OK:
                 break;
@@ -160,29 +176,36 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
             case OPT_ERROR:
         	status = 1;
         	goto exit;
-        	
+
+			// parseCommonOpts()只解析部分参数，如-client, -d32等，剩下的在下面解析
             case OPT_UNREC:
             default:
                 if(strcmp(argv[i], "-?") == 0 ||
                    strcmp(argv[i], "-help") == 0) {
+                   // 显示帮助信息
                     goto usage;
 
                 } else if(strcmp(argv[i], "-X") == 0) {
+                	// 显示非标准参数信息，如-Xss(stack size)
                     showNonStandardOptions();
                     goto exit;
 
                 } else if(strcmp(argv[i], "-version") == 0) {
+                	// 打印版本信息并退出
                     showVersionAndCopyright();
                     goto exit;
 
                 } else if(strcmp(argv[i], "-showversion") == 0) {
+                	// 打印版本信息并继续
                     showVersionAndCopyright();
         
                 } else if(strcmp(argv[i], "-fullversion") == 0) {
+                	// 显示完整信息并退出
                     showFullVersion();
                     goto exit;
 
                 } else if(strncmp(argv[i], "-verbose", 8) == 0) {
+                	// 启用详细输出，-verbose:[class|gc|jni]，冒号后面表示打印级别
                     char *type = &argv[i][8];
 
                     if(*type == '\0' || strcmp(type, ":class") == 0)
@@ -199,14 +222,16 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
 
                 } else if(strcmp(argv[i], "-classpath") == 0 ||
                           strcmp(argv[i], "-cp") == 0) {
-
+					// 设置class path
                     if(i == argc - 1) {
                         printf("%s : missing path list\n", argv[i]);
                         goto exit;
                     }
+					// 注意这里的 i 自增了
                     args->classpath = argv[++i];
 
                 } else if(strncmp(argv[i], "-Xbootclasspath/c:", 18) == 0) {
+                	// 冒号类型的参数，直接取冒号后面的字符串
                     args->bootpath_c = argv[i] + 18;
 
                 } else if(strncmp(argv[i], "-Xbootclasspath/v:", 18) == 0) {
@@ -241,32 +266,42 @@ int main(int argc, char *argv[]) {
     int status;
     int i;
 
+	// 设置参数默认值
     setDefaultInitArgs(&args);
+	// 解析命令行参数，并覆盖参数默认值
     class_arg = parseCommandLine(argc, argv, &args);
 
+	// 设置运行时栈，stack
     args.main_stack_base = &array_class;
 
+	// 根据上述参数，初始化虚拟机
     if(!initVM(&args)) {
         printf("Could not initialise VM.  Aborting.\n");
         exit(1);
     }
 
+	// 设置类加载器，它会调用API lib中的java.lang.ClassLoader.getSystemClassLoader()
+	// 来获取class loader对象
    if((system_loader = getSystemClassLoader()) == NULL)
         goto error;
 
     mainThreadSetContextClassLoader(system_loader);
 
+	// 把qualified class name里的"."替换为"/"
     for(cpntr = argv[class_arg]; *cpntr; cpntr++)
         if(*cpntr == '.')
             *cpntr = '/';
 
+	// 根据class name，找到main class对象
     main_class = findClassFromClassLoader(argv[class_arg], system_loader);
+	// 初始化main class
     if(main_class != NULL)
         initClass(main_class);
 
     if(exceptionOccurred())
         goto error;
 
+	// 找到main函数
     mb = lookupMethod(main_class, SYMBOL(main),
                                   SYMBOL(_array_java_lang_String__V));
 
@@ -275,8 +310,8 @@ int main(int argc, char *argv[]) {
         goto error;
     }
 
+	// 整理字符串数组，为main函数的参数作准备
     /* Create the String array holding the command line args */
-
     i = class_arg + 1;
     if((array_class = findArrayClass(SYMBOL(array_java_lang_String))) &&
            (array = allocArray(array_class, argc - i, sizeof(Object*))))  {
@@ -286,6 +321,7 @@ int main(int argc, char *argv[]) {
             if(!(args[i] = Cstr2String(argv[i])))
                 break;
 
+		// 调用main函数
         /* Call the main method */
         if(i == argc)
             executeStaticMethod(main_class, mb, array);
@@ -297,6 +333,7 @@ error:
     if((status = exceptionOccurred() ? 1 : 0))
         uncaughtException();
 
+	// 结束deamon线程，并退出虚拟机
     /* Wait for all but daemon threads to die */
     mainThreadWaitToExitVM();
     exitVM(status);
