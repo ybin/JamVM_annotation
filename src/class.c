@@ -1686,9 +1686,11 @@ Class *initClass(Class *class) {
    if(cb->state >= CLASS_INITED)
       return class;
 
+	// 没问题，如果已经是CLASS_LINKED状态，直接返回。
    linkClass(class);
    objectLock(class);
 
+	// 不要重复初始化
    while(cb->state == CLASS_INITING)
       if(cb->initing_tid == threadSelf()->id) {
          objectUnlock(class);
@@ -1712,11 +1714,13 @@ Class *initClass(Class *class) {
        return NULL;
    }
 
+	// 开始初始化。。。
    cb->state = CLASS_INITING;
-   cb->initing_tid = threadSelf()->id;
+   cb->initing_tid = threadSelf()->id; // pthread得到的id
 
    objectUnlock(class);
 
+	// 如有必要，首先初始化父类
    if(!(cb->access_flags & ACC_INTERFACE) && cb->super
               && (CLASS_CB(cb->super)->state != CLASS_INITED)) {
       initClass(cb->super);
@@ -1731,6 +1735,7 @@ Class *initClass(Class *class) {
       compilation can result in a getstatic to a (now) constant field,
       and the VM didn't initialise it... */
 
+	// 初始化 static fields
    for(i = 0; i < cb->fields_count; i++,fb++)
       if((fb->access_flags & ACC_STATIC) && fb->constant) {
          if((*fb->type == 'J') || (*fb->type == 'D'))
@@ -1739,6 +1744,7 @@ Class *initClass(Class *class) {
             fb->u.static_value.u = resolveSingleConstant(class, fb->constant);
       }
 
+	// 调用<init>函数，注意这可不是构造函数哦！
    if((mb = findMethod(class, SYMBOL(class_init), SYMBOL(___V))) != NULL)
       executeStaticMethod(class, mb);
 
