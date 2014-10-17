@@ -801,6 +801,19 @@ Class *parseClass(char *classname, char *data, int offset, int len,
     return class;
 }
 
+/*
+	class的load过程。
+	该过程的任务就是从.class文件读取出数据保存为byte[](or char*)，
+	然后按照JVM spec的规定解析byte[]，解析结果为class的VM内部形式，
+	即(见parseClass()的注释)
+			Class * -->	+-----------------------+
+						| header| lock (4 bytes)|
+						|		| Class * (ptr) |
+	   ClassBlock * -->	+-----------------------+
+						|	ClassBlock object	|
+						|    ( mass of mem )	|
+						+-----------------------+
+*/
 Class *defineClass(char *classname, char *data, int offset, int len,
                    Object *class_loader) {
 
@@ -1112,10 +1125,57 @@ typedef struct miranda {
     int default_conflict;
 } Miranda;
 
+/*
+	class的link过程。
+
+
+	缩写:
+	"cb":	class block
+	"mb":	method block
+	"spr":	super
+	"i":	interface
+	"tbl":	table
+
+	link过程主要的工作就是构建函数表，包括
+		- method_table
+			- super method table(从父类继承而来的函数)
+			- extends methods(子类新定义的函数)
+		- interface_method_table
+			- method table of super interface
+			- interface method table of super interface
+	
+	这里的父类、子类既可以是Class也可以是Interface。
+
+	对于接口而言，它所有的函数分为两部分: 
+		- 自身定义的部分，放置到method table中
+		- 扩展而来的部分，放置到interface method table中，包括
+			- method table of interfaces[i]
+			- interface method table of interfaces[i]
+
+	例如，
+		Interface A { void a(); }
+		Interface B extends A { void b(); }
+		Interface C extends B { void c(); }
+		Interface D extends C { void d(); }
+		class E implements D { ... }
+	各个接口的method table和interface method table的内容如下，
+	(A)	method table:	a()
+		imethod table:	null
+	(B)	method table:	b()
+		imethod talbe:	a() + [null]
+	(C) method table:	c()
+		imethod table:	b() + [a() + null]
+	(D) method table:	d()
+		imethod table:	c() + [b() + a() + null]
+	(E) method table:	super method table + extends methods
+		imethod table:	d() + [c() + b() + a() + null]
+	imethod table始终由两部分组成，除非有时某些部分为null。
+*/
 void linkClass(Class *class) {
    static MethodBlock *obj_fnlzr_mthd = NULL;
 
    ClassBlock *cb = CLASS_CB(class);
+   // interface没有父类
    Class *super = (cb->access_flags & ACC_INTERFACE) ? NULL : cb->super;
 
    ITableEntry *spr_imthd_tbl = NULL;
@@ -1144,6 +1204,8 @@ void linkClass(Class *class) {
    if(verbose)
        jam_printf("[Linking class %s]\n", cb->name);
 
+	// 首先link父类
+	// 记录父类的flag, method table, interface method table
    if(super) {
       ClassBlock *super_cb = CLASS_CB(super);
       if(super_cb->state < CLASS_LINKED)
@@ -1159,8 +1221,16 @@ void linkClass(Class *class) {
    /* Calculate object layout */
    prepareFields(class);
 
+	/* 
+		根据函数类型挨个处理:
+			- abstract函数
+			- native函数
+			- static, private, init函数
+			- inherited函数(设置函数的method table index)
+			- extends函数(子类中新定义的函数，以备继承之用)
+	*/
+	
    /* Prepare methods */
-
    for(mb = cb->methods, i = 0; i < cb->methods_count; i++,mb++) {
        int count = 0;
        char *sig = mb->type;
@@ -1168,6 +1238,8 @@ void linkClass(Class *class) {
        /* calculate argument count from signature */
        SCAN_SIG(sig, count+=2, count++);
 
+		// static method参数个数有多少是多少，
+		// instance method却要增加 1，这是为"this"预留的位置
        if(mb->access_flags & ACC_STATIC)
            mb->args_count = count;
        else
@@ -1175,12 +1247,14 @@ void linkClass(Class *class) {
 
        mb->class = class;
 
+		// abstract method都有一个同一的code，即abstract_method
        /* Set abstract method to stub */
        if(mb->access_flags & ACC_ABSTRACT) {
            mb->code_size = sizeof(abstract_method);
            mb->code = abstract_method;
        }
-
+		// native method的stack size为0，局部变量就是参数而已
+		// 关键是它有一个native invoker
        if(mb->access_flags & ACC_NATIVE) {
 
            /* set up native invoker to wrapper to resolve function 
@@ -1196,6 +1270,9 @@ void linkClass(Class *class) {
            mb->max_stack = 0;
        }
 
+		// static, private, init函数不用进入method table,
+		// method table是用来实现重载的，上面提到的函数没有重载形式。
+		
        /* Static, private or init methods aren't dynamically invoked, so
          don't stick them in the table to save space */
 
@@ -1203,8 +1280,11 @@ void linkClass(Class *class) {
                               (mb->name[0] == '<'))
            continue;
 
+		// 如果当前method覆盖父类的method，那么就将当前method的method_table_index
+		// 设置为父类method的index，最后再根据该index，在当前class的method table
+		// 中进行替换，从而实现覆盖。
+		
        /* if it's overriding an inherited method, replace in method table */
-
        for(j = 0; j < spr_mthd_tbl_sze; j++)
            if(mb->name == spr_mthd_tbl[j]->name &&
                         mb->type == spr_mthd_tbl[j]->type &&
@@ -1212,13 +1292,26 @@ void linkClass(Class *class) {
                mb->method_table_index = spr_mthd_tbl[j]->method_table_index;
                break;
            }
-
+		// 如果下面的if成立，说明当前method并非覆盖父类同名method，
+		// 即它是一个子类扩展出来的新函数，该函数的索引从spr_mthd_tbl_sze
+		// 位置开始，同时记录新函数的变量增加。
        if(j == spr_mthd_tbl_sze)
            mb->method_table_index = spr_mthd_tbl_sze + new_methods_count++;
    }
 
+	/*
+		构建函数表 - 只有可继承的函数才会进入函数表，static, private, init函数
+					 是不会进入函数表的。
+		函数表的组成部分:
+			+----------------------+
+			|  super method table  |
+			+----------------------+
+			|      new methods     |
+			|(child class extended)|
+			+----------------------+
+		当前函数表的大小 = super类函数表大小 + 当前类扩展函数个数
+	*/
    /* construct method table */
-
    method_table_size = spr_mthd_tbl_sze + new_methods_count;
 
    if(!(cb->access_flags & ACC_INTERFACE)) {
@@ -1231,6 +1324,9 @@ void linkClass(Class *class) {
        /* fill in the additional methods -- we use a
           temporary because fillinMtable alters mb */
        mb = cb->methods;
+	   // 根据method的index填充method table，由于发生函数覆盖时，
+	   // 子类函数跟父类同名函数的index相等，所以子类函数表中的函数
+	   // 就会覆盖父类同名函数，重载由此得以实现。
        fillinMTable(method_table, mb, cb->methods_count);
    }
 
@@ -1238,7 +1334,30 @@ void linkClass(Class *class) {
 
    /* number of interfaces implemented by this class is those implemented by
     * parent, plus number of interfaces directly implemented by this class,
-    * and the total number of their superinterfaces */
+    * and the total number of their superinterfaces
+    * 
+    * 一个类的接口数量(imethod_table_size)等于
+    *	自身implements的接口 + 这些接口的所有父类接口 + 父类实现的接口
+    * 一个接口的接口数量等于
+    *	父类接口的函数数量(包括父类函数表+父类imethod table)
+    
+    * 接口的函数表: 只是比类函数表少了super的部分，因为接口没有父类
+			+--------------------------+
+			|        new methods       |
+			|(child interface extended)|
+			+--------------------------+
+
+	* interface method table: 
+			+-------------------------------+
+			| super imethod_table(for Class)|
+			+-------------------------------+
+			| method_table of interface[i]  |
+			+-----------------------------_-+
+			| imethod_table of interface[i] |
+			+-------------------------------+
+	 对于Class，存在super imethod table，而对于Interface则不存在，
+	 因为Interface没有父类。
+    */
 
    new_itable_count = cb->interfaces_count;
    for(i = 0; i < cb->interfaces_count; i++)
@@ -1270,9 +1389,11 @@ void linkClass(Class *class) {
        Class *intf = cb->interfaces[i];
        ClassBlock *intf_cb = CLASS_CB(intf);
 
+		// method_table of interface[i]
        cb->imethod_table[itbl_idx++].interface = intf;
        itbl_offset_count += intf_cb->method_table_size;
 
+		// imethod_table of interface[i]
        for(j = 0; j < intf_cb->imethod_table_size; j++) {
            Class *spr_intf = intf_cb->imethod_table[j].interface;
 
@@ -1284,6 +1405,7 @@ void linkClass(Class *class) {
    fastEnableSuspend(self);
 
    /* if we're an interface all finished - offsets aren't used */
+   /* 对于接口来说，流程走到这里就结束了，但是对于类来说却远不止于此 */
 
    if(!(cb->access_flags & ACC_INTERFACE)) {
        int *offsets_pntr = sysMalloc(itbl_offset_count * sizeof(int));
@@ -1476,7 +1598,11 @@ void linkClass(Class *class) {
 
    /* If this is Object find the finalize method.  All subclasses will
       have it in the same place in the method table.  Note, Object
-      should always have a valid finalizer -- but check just in case */
+      should always have a valid finalizer -- but check just in case
+
+      如果是Object(没有super就表示是Object)，找到finalizer()的method table index
+      并用全局函数记录下来，子类中的finalizer就用这个index
+    */
 
    if(cb->super == NULL) {
        MethodBlock *finalizer = findMethod(class, SYMBOL(finalize),
@@ -1498,7 +1624,9 @@ void linkClass(Class *class) {
           method_table[finalize_mtbl_idx] != obj_fnlzr_mthd)
        cb->flags |= FINALIZED;
 
-   /* Handle reference classes */
+   /* Handle reference classes
+   *  处理引用类
+   */
 
    if(ref_referent_offset == -1 &&
                cb->name == SYMBOL(java_lang_ref_Reference)) {
