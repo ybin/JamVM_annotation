@@ -950,7 +950,25 @@ Class *createPrimClass(char *classname, int index) {
    Double/long fields are layed out first, then references and finally
    int-sized fields.  When padding is needed for 64-bit fields we try
    to place an int-sized field, and only leave a hole when no int-sized
-   fields are available */
+   fields are available. 
+
+   一个对象在内存中的布局如下:
+   
+   Object* ---> +--------+-----------+
+	   			|        |   lock    |
+	   			| header +-----------+
+	   			|		 |  Class *  |
+	   			+--------+-----------+	\		+---------------+
+	   			|  non-static fileds |	|		| double fields	|
+	   			|		in super	 |	|		| 	 8 bits		|
+	   			+--------------------+	| ---->	+---------------+
+	   			|  non-static fields |	|		|  ref fields	|
+	   			|	  in subclass	 |	|		|   4/8 bits	|
+	   			+--------------------+	/		+-------------- +
+	   											|  int fields	|
+	   											|    4 bits		|
+	   											+---------------+
+*/
 
 void prepareFields(Class *class) {
     ClassBlock *cb = CLASS_CB(class);
@@ -963,12 +981,16 @@ void prepareFields(Class *class) {
     FieldBlock *int_head = NULL;
     FieldBlock *dbl_head = NULL;
 
+	// field_offset表示field在instance所占的内存中的偏移量，
+	// 所有fields所占空间加上sizeof(Object)就是一个instance在内存中的实际大小
+	// Object是所有instance的header
     int field_offset = sizeof(Object);
     int refs_start_offset = 0;
     int refs_end_offset = 0;
     int i;
 
     if(super != NULL) {
+		// 如果存在父类，首先把父类中fields所占内存大小加上
         field_offset = CLASS_CB(super)->object_size;
         spr_rfs_offsts_sze = CLASS_CB(super)->refs_offsets_size;
         spr_rfs_offsts_tbl = CLASS_CB(super)->refs_offsets_table;
@@ -982,11 +1004,32 @@ void prepareFields(Class *class) {
     for(i = 0; i < cb->fields_count; i++) {
         FieldBlock *fb = &cb->fields[i];
 
+		// 注意初始化的方式: 因为fb->u是一个union，所以只需把其中占空最大的
+		// 初始化了，那么整个union就初始化了，在这里的解读就是:
+		// 只要field为static的，那么不论其为何种类型(int, long, double, ref etc.)
+		// 统统初始化为0。所以只需初始化long long类型即可。
         if(fb->access_flags & ACC_STATIC)
             fb->u.static_value.l = 0;
         else {
+			/*
+				这里比较绕，但是这是一个最基本的链表操作
+					list: 中间变量，用来操作(修改)表头，所以它是pointer of pointer
+					
+					head: 表头，有三种: ref_head, dbl_head, int_head，分别表示三个列表
+					fb  : 节点(node)，每一轮for循环就改变一个节点
+					p   : fb->u.static_value.p, 相当于node的next指针
+
+				节点是倒序插入的，如三个double类型field插入列表的过程将是这样的:
+					dbl_head->fb1
+					dbl_head->fb2->fb1
+					dbl_head->fb3->fb2->fb1
+
+				总之，下面的代码的总体功能就是把所有的非静态fields分别放置到三个列表中。
+			*/
+			
             FieldBlock **list;
 
+			// list用来修改xxx_head，所以首先根据field的类型选择修改哪个列表
             if(fb->type[0] == 'L' || fb->type[0] == '[')
                 list = &ref_head;
             else
@@ -995,6 +1038,12 @@ void prepareFields(Class *class) {
                 else
                     list = &int_head;
 
+			/* 将该节点(fb)添加到对应的列表中，太晦涩? 看下面的标准操作
+				node->next = head;
+				head = &node;
+			   只是我们这里的head有可能是三种里面的任意一种，我们不能直接用
+			   xxx_head，所以使用一个变量list来修改xxx_head
+			*/
             fb->u.static_value.p = *list;
             *list = fb;
         }
@@ -1002,20 +1051,35 @@ void prepareFields(Class *class) {
         fb->class = class;
     }
 
+	/*
+		下面开始排布各个fields，所谓的排布，就是设置每个field的offset，
+		这样，创建instance的时候就可以按照每个field的offset来安排其位置了。
+
+		注意一点: 从field_offset的大小来看，如果存在父类，那么父类的fields
+		是直接拿来用的，不再打散重新排布，下面排布的是子类中定义的non-static fields.
+
+		首先布局double类型，因为该类型占空最多
+	*/
+	
     /* Layout the double-sized fields.  If padding is required,
        use the first int-sized field (int_list head), or leave
        a hole if no int-fields */
 
     if(dbl_head != NULL) {
+		// 到现在为止，如果instance size不是8字节对齐的，走if流程，
+		// 因为所有的属性不是8字节就是4字节，所以如果不是8字节对齐
+		// 肯定就是4字节对齐的，所以取一个4字节的属性来填空
         if(field_offset & 0x7) {
             if(int_head != NULL) {
                 FieldBlock *fb = int_head;
                 int_head = int_head->u.static_value.p;
                 fb->u.offset = field_offset;
             }
+			// +4之后一定是8字节对齐了
             field_offset += 4;
         }
 
+		// 下面遍历dbl_head队列，排布8字节fields
         do {
             FieldBlock *fb = dbl_head;
             dbl_head = dbl_head->u.static_value.p;
@@ -1030,6 +1094,10 @@ void prepareFields(Class *class) {
 
     if(ref_head != NULL) {
         if(sizeof(Object*) == 8 && field_offset & 0x7) {
+			/*
+				如果指针占用8个字节，而当前field_offset并非8字节对齐，
+				那么就填个空，当然是4字节的空。
+			*/
             if(int_head != NULL) {
                 FieldBlock *fb = int_head;
                 int_head = int_head->u.static_value.p;
@@ -1038,8 +1106,9 @@ void prepareFields(Class *class) {
             field_offset += 4;
         }
 
+		// OK, now, ref fields start ......
         refs_start_offset = field_offset;
-
+		// 下面遍历ref_head队列，排布ref类型的fields
         do {
             FieldBlock *fb = ref_head;
             ref_head = ref_head->u.static_value.p;
@@ -1047,11 +1116,12 @@ void prepareFields(Class *class) {
             field_offset += sizeof(Object*);
         } while(ref_head != NULL);
 
+		// well, now, ref fields end ......
         refs_end_offset = field_offset;
     }
 
     /* Layout the remaining int-sized fields */
-
+	// 剩下的就都是int类型的4字节fields啦
     while(int_head != NULL) {
         FieldBlock *fb = int_head;
         int_head = int_head->u.static_value.p;
@@ -1059,11 +1129,20 @@ void prepareFields(Class *class) {
         field_offset += 4;
     }
 
+	// 排布完成之后，instance(object) size也就最终确定了
+	// sizeof(object) = sizeof(Object) + super->object_size + field_offset
+	// object size = size of Object header + 父类中fields所占size + 子类fields所占size
+	
    cb->object_size = field_offset;
 
    /* Construct the reference offsets list.  This is used to speed up
       scanning of an objects references during the mark phase of GC.
-      If possible, merge the entry with the previous entry */
+      If possible, merge the entry with the previous entry.
+
+      mark-sweep GC时要扫描每个对象引用的其他对象，也就是扫描每个对象的
+      ref fields，下面构建一个refs_offsets_table会加快这一扫描过程，因为
+      有这个table，就不需要遍历对象的所有fields了，速度自然会加快。
+    */
 
    if(refs_start_offset) {
        if(spr_rfs_offsts_sze > 0 && spr_rfs_offsts_tbl[spr_rfs_offsts_sze-1].end

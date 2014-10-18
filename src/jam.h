@@ -630,6 +630,14 @@ typedef struct fieldblock {
    char *signature;
    u2 access_flags;
    u2 constant;
+   /*
+   		外层union表示:
+   			如果是static field，那么u用来记录field的值(u.static_value)
+   			否则u用来记录field在object所占据的内存块儿中的偏移(u.offset)
+
+   		内存union表示static value的不同类型的值，可以是单字节的，四字节的，八字节的，
+   		还可以是reference。
+   */
    union {
        union {
            char data[8];
