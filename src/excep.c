@@ -30,12 +30,45 @@
 #include "thread.h"
 #include "classlib.h"
 
+/*
+	异常处理机制：
+		当发生异常的时候，生成一个Throwable对象(java.lang.Throwable)，
+		然后将stack用StackTraceElement[]表示出来，供Throwable对象使用。
+
+	excep.c中需要做的事情:
+		- 加载所有可能的exception类，因为不知道什么时候哪种异常会发生
+		- 异常发生时，创建该异常对应的对象，用于记录异常类型(signalChainedException())
+		- 根据stack frames创建StackTraceElement[]数组，供异常对象使用(如printStackTrace())
+
+	创建StackTraceElement[]的过程:
+	
+		   stack			  buffer[]			StackTraceElement[]
+			
+		+---------+		+-----------------+		+--------------+
+		| frame 0 |		| mb ptr, last_pc |		| STE object 0 |
+		+---------+		+-----------------+		+--------------+
+		| frame 1 |  =>	| mb ptr, last_pc |	 =>	| STE object 1 |
+		+---------+		+-----------------+		+--------------+
+		|   ...   |		|     ......	  |		|    ......    |
+		+---------+		+-----------------+		+--------------+
+
+	StackTraceElement对象用于记录一个frame的状态，它会保存一个frame
+	对应的class name, method name, file name, line number。
+
+	StackTraceElement[] 是一个array，每一个元素代表stack中的一个frame，
+	整个array即代表stack的状态。
+*/
+
+// 'ste' means "stack trace element"
 static Class *ste_array_class, *ste_class, *throw_class;
 static MethodBlock *ste_init_mb;
 static int inited = FALSE;
 
+// 每个exception对应一个Class，根据异常号查询其对应的Class
 static Class *exceptions[MAX_EXCEPTION_ENUM];
-
+// 异常号到异常类名字的映射
+// e.g. exception_java_lang_LinkageError这个异常号对应的异常类名即为
+//	exception_symbols[exception_java_lang_LinkageError]
 static int exception_symbols[] = {
     CLASSLIB_EXCEPTIONS_DO(SYMBOL_NAME_ENUM)
     EXCEPTIONS_DO(SYMBOL_NAME_ENUM)
@@ -49,6 +82,7 @@ int initialiseException() {
     throw_class = findSystemClass0(SYMBOL(java_lang_Throwable));
 
     if(ste_array_class != NULL && ste_class != NULL && throw_class != NULL)
+		// 调用<init>函数，参数为String, String, String, int，返回值为void
         ste_init_mb = findMethod(ste_class, SYMBOL(object_init),
            SYMBOL(_java_lang_String_java_lang_String_java_lang_String_I__V));
 
@@ -61,7 +95,10 @@ int initialiseException() {
 
     /* Load and register the exceptions used within the VM.
        These are preloaded to speed up access.  The VM will
-       abort if any can't be loaded */
+       abort if any can't be loaded 
+
+       加载所有异常类，并且将其register
+     */
 
     for(i = 0; i < MAX_EXCEPTION_ENUM; i++) {
         exceptions[i] = findSystemClass0(symbol_values[exception_symbols[i]]);
@@ -94,27 +131,33 @@ void clearException() {
     ee->exception = NULL;
 }
 
+/*
+	创建异常类的对象，并调用initCause()函数
+*/
 void signalChainedExceptionClass(Class *exception, char *message,
                                  Object *cause) {
 
+	// 分配对象内存
     Object *exp = allocObject(exception);
     Object *str = message == NULL ? NULL : Cstr2String(message);
     MethodBlock *init = lookupMethod(exception, SYMBOL(object_init),
                                                 SYMBOL(_java_lang_String__V));
-
     if(exp && init) {
+		// 调用<init>函数
         executeMethod(exp, init, str);
-
+		// 调用initCause()函数
         if(cause && !exceptionOccurred()) {
             MethodBlock *mb = lookupMethod(exception, SYMBOL(initCause),
                              SYMBOL(_java_lang_Throwable__java_lang_Throwable));
             if(mb)
                 executeMethod(exp, mb, cause);
         }
+		// 设置异常
         setException(exp);
     }
 }
 
+// 根据exception name设置异常
 void signalChainedExceptionName(char *excep_name, char *message,
                                 Object *cause) {
     if(!inited) {
@@ -132,6 +175,7 @@ void signalChainedExceptionName(char *excep_name, char *message,
     }
 }
 
+// 根据exception number设置异常
 void signalChainedExceptionEnum(int excep_enum, char *message, Object *cause) {
     if(!inited) {
         char *excep_name = symbol_values[exception_symbols[excep_enum]];
@@ -159,6 +203,7 @@ void printException() {
         MethodBlock *mb = lookupMethod(excep->class, SYMBOL(printStackTrace),
                                                      SYMBOL(___V));
         clearException();
+		// printStackTrace
         executeMethod(excep, mb);
 
         /* If we're really low on memory we might have been able to throw
@@ -178,15 +223,25 @@ CodePntr findCatchBlockInMethod(MethodBlock *mb, Class *exception,
 
     ExceptionTableEntry *table = mb->exception_table;
     int size = mb->exception_table_size;
+	// pc为当前指令的位置，pc_pntr为当前指令的指针
     int pc = pc_pntr - ((CodePntr)mb->code);
     int i;
- 
+
+ 	// 遍历整个exception table，看看当前指令位于哪个exception handler
+ 	// 的捕获范围之内
     for(i = 0; i < size; i++)
+		// 如果当前指令位于start_pc和end_pc之间，
+		// 说明这个handler捕获到该异常了
         if((pc >= table[i].start_pc) && (pc < table[i].end_pc)) {
 
             /* If the catch_type is 0 it's a finally block, which matches
                any exception.  Otherwise, the thrown exception class must
-               be an instance of the caught exception class to catch it */
+               be an instance of the caught exception class to catch it
+
+               如果type == 0，说明是finally block，此处忽略。
+               这里要确保抛出的异常必须是caught exception的子类。
+               即，如果catch(Exception)，那么所有抛出的异常都会捕获到。
+             */
 
             if(table[i].catch_type != 0) {
                 Class *caught_class = resolveClass(mb->class,
@@ -199,12 +254,14 @@ CodePntr findCatchBlockInMethod(MethodBlock *mb, Class *exception,
                 if(!isInstanceOf(caught_class, exception))
                     continue;
             }
+			// 返回exception handler的代码指针
             return ((CodePntr)mb->code) + table[i].handler_pc;
         }
 
     return NULL;
 }
-    
+
+// 遍历真个frame stack，查找每个frame里的method，直到找到catch block
 CodePntr findCatchBlock(Class *exception) {
     Frame *frame = getExecEnv()->last_frame;
     CodePntr handler_pc = NULL;
@@ -226,6 +283,9 @@ CodePntr findCatchBlock(Class *exception) {
     return handler_pc;
 }
 
+/*
+	把指令位置映射为行号
+*/
 int mapPC2LineNo(MethodBlock *mb, CodePntr pc_pntr) {
     int pc = pc_pntr - (CodePntr) mb->code;
     int i;
@@ -251,6 +311,7 @@ Frame *skipExceptionFrames(Frame *last) {
     return last;
 }
 
+// 计算stack上frame的深度
 int countStackFrames(Frame *last, int max_depth) {
     int depth = 0;
 
@@ -264,6 +325,18 @@ out:
     return depth;
 }
 
+/* 将stack frames转换为指针数组的形式
+	这个数组格式如下:
+		+---------------+
+		| MethodBlock *	|
+		| last_pc		|
+		+---------------+
+		| MethodBlock *	|
+		| last_pc		|
+		+---------------+
+	即每两个item表示一个frame。所以在转换过程中，
+	length有个两倍的关系。
+*/
 void stackTrace2Buffer(Frame *last, void **data, int max_depth) {
     int limit = max_depth * 2, depth = 0;
 
@@ -300,13 +373,16 @@ Object *stackTrace(ExecEnv *ee, int max_depth) {
     return array;
 }
 
+// 根据MethodBlock创建StackTraceElement对象
 Object *stackTraceElement(MethodBlock *mb, CodePntr pc) {
     ClassBlock *cb = CLASS_CB(mb->class);
     int is_native = mb->access_flags & ACC_NATIVE;
+	// 用点表示的类名，如java.lang.Class，而不是'/'分割的类名
     char *dot_name = classlibExternalClassName(mb->class);
 
     Object *methodname = createString(mb->name);
     Object *classname = createString(dot_name);
+	// 创建StackTraceElement对象
     Object *ste = allocObject(ste_class);
     Object *filename = NULL;
 
@@ -320,6 +396,8 @@ Object *stackTraceElement(MethodBlock *mb, CodePntr pc) {
             return NULL;
     }
 
+	// 调用StackTraceElement类的<init>函数，创建对象
+	// public StackTraceElement(String class, String method, String file, int line) { ... }
     executeMethod(ste, ste_init_mb,
                   findInternedString(classname), 
                   findInternedString(methodname), 
@@ -332,6 +410,7 @@ Object *stackTraceElement(MethodBlock *mb, CodePntr pc) {
     return ste;
 }
 
+// 根据stack trace的数据，创建StackTraceElement[]用来表示stack
 Object *convertTrace2Elements(void **trace, int len) {
     Object *ste_array;
     Object **dest;

@@ -56,3 +56,16 @@ enum {
     EXCEPTIONS_DO(EXCEPTION_ENUM),
     MAX_EXCEPTION_ENUM
 }; 
+
+/*
+	定义 异常号。
+
+	enum定义的结果就是为每一个异常号起一个名字，
+
+	enum {
+		exception_java_lang_LinkageError = 0,
+		exception_java_lang_InternalError = 1,
+		// ......
+		exception_java_lang_StringIndexOutOfBoundsException = ???
+	}
+*/

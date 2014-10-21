@@ -407,10 +407,10 @@ typedef struct constant_pool {
 } ConstantPool;
 
 typedef struct exception_table_entry {
-    u2 start_pc;
-    u2 end_pc;
-    u2 handler_pc;
-    u2 catch_type;
+    u2 start_pc; 	// try的开始位置
+    u2 end_pc;		// try的结束位置
+    u2 handler_pc;	// exception handler的位置
+    u2 catch_type;	// catch的异常类型
 } ExceptionTableEntry;
 
 typedef struct line_no_table_entry {
@@ -785,12 +785,22 @@ typedef struct InitArgs {
 #endif
 } InitArgs;
 
+// 获取Class object中的data部分。+1表示越过header
 #define CLASS_CB(classRef)           ((ClassBlock*)(classRef+1))
 
+/* 获取instance的某个field的地址。
+	obj为instance_base，即instance的data部分
+	offset为该field在instance中的偏移量
+*/
 #define INST_DATA(obj, type, offset) *(type*)&((char*)obj)[offset]
+// 获取instance的data部分。+1表示越过header
 #define INST_BASE(obj, type)         ((type*)(obj+1))
 
+/*
+	获取Array中的data部分。第一个+1表示越过header，第二个+1表示越过length值
+*/
 #define ARRAY_DATA(arrayRef, type)   ((type*)(((uintptr_t*)(arrayRef+1))+1)) 
+// 对于Array来说，header之后紧跟的就是array length值
 #define ARRAY_LEN(arrayRef)          *(uintptr_t*)(arrayRef+1)
 
 #define IS_CLASS(object)             (object->class && IS_CLASS_CLASS( \
