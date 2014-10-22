@@ -61,7 +61,11 @@ static Monitor sleep_mon;
 
 /* If supported, use thread local storage to store the
    thread's Thread pntr.  If not, use a pthread thread
-   specific key to hold it */
+   specific key to hold it
+
+   用Thread Local Storage来保存self变量，即每个线程都有一个
+   标识自己的变量。
+*/
 #ifdef HAVE_TLS
 static __thread Thread *self = NULL;
 #else
@@ -448,6 +452,23 @@ void initialiseJavaStack(ExecEnv *ee) {
    ee->stack_end = stack + stack_size-STACK_RED_ZONE_SIZE;
 }
 
+/*
+	初始化Java level线程
+		- 创建java.lang.Thread对象
+		- 按照classlib的不同要求，分情况初始化Java level thread
+		- add (vm level) thread to hash table
+
+	VM thread对象与Java thread对象的关联:
+	
+		VM thread	ExecEnv			Java thread object
+		+-----+
+		| ee  | -->	+--------+
+		+-----+		| thread | --->	+-------------+
+		| ... |		+--------+		| Java thread |
+		+-----+		|  ....	 |		|    object	  |
+					+--------+		+-------------+
+
+*/
 Object *initJavaThread(Thread *thread, char is_daemon, char *name,
                        Object *group) {
 
@@ -474,6 +495,13 @@ Object *initJavaThread(Thread *thread, char is_daemon, char *name,
     return jlthread;
 }
 
+
+/*
+	初始化VM level线程
+		- 初始化stack
+		- 初始化各种lock
+		- 将thread添加到thread队列(main_thread为head)
+*/
 void initThread(Thread *thread, char is_daemon, void *stack_base) {
 
     /* Create the thread stack and store the thread structure in
@@ -572,7 +600,11 @@ Thread *attachThread(char *name, char is_daemon, void *stack_base,
 }
 
 /* Call uncaughtException on the thread's exception handler, or the
-   thread's group if this is unset */
+   thread's group if this is unset.
+
+   对于未捕获到的exception，调用java.lang.Thread的默认handler，
+   注意不同的classlib中这个handler名字是不一样的，所以要区别对待。
+ */
 
 void uncaughtException() {
     Thread *thread = threadSelf();
@@ -695,6 +727,7 @@ void *detachThread(Thread *thread) {
     return keep_alive;
 }
 
+// 这个函数是在pthread里启动运行的
 void *threadStart(void *arg) {
     Thread *thread = (Thread *)arg;
     Object *jThread = thread->ee->thread;
@@ -703,6 +736,7 @@ void *threadStart(void *arg) {
        This is inherited so we need to enable */
     enableSuspend(thread);
 
+	// 初始化VM level thread
     /* Complete initialisation of the thread structure, create the thread
        stack and add the thread to the thread list */
     initThread(thread, INST_DATA(jThread, int, daemon_offset), &thread);
@@ -710,12 +744,15 @@ void *threadStart(void *arg) {
     /* Add thread to thread ID map hash table. */
     addThreadToHash(thread);
 
+	// 设置thread state为running，并告知父线程(父线程创建完之后还等待子线程运行呢)
     /* Set state to running and notify creating thread */
     signalThreadRunning(thread);
 
+	// 运行java.lang.Thread.run()
     /* Execute the thread's run method */
     executeMethod(jThread, CLASS_CB(jThread->class)->method_table[run_mtbl_idx]);
 
+	// 运行结束，退出。
     /* Run has completed.  Detach the thread from the VM and exit */
     detachThread(thread);
 
@@ -723,9 +760,12 @@ void *threadStart(void *arg) {
     return NULL;
 }
 
+// 为Java level thread创建VM thread环境
 void createJavaThread(Object *jThread, long long stack_size) {
     Thread *self = threadSelf();
+	// 创建运行时环境
     ExecEnv *ee = sysMalloc(sizeof(ExecEnv));
+	// 为Java thread创建VM thread对象
     Thread *thread = sysMalloc(sizeof(Thread));
 
     memset(ee, 0, sizeof(ExecEnv));
@@ -743,6 +783,7 @@ void createJavaThread(Object *jThread, long long stack_size) {
 
     disableSuspend(self);
 
+	// 创建pthread线程来运行Java thread的run()函数
     if(pthread_create(&thread->tid, &attributes, threadStart, thread)) {
         classlibMarkThreadTerminated(jThread);
         sysFree(ee);
@@ -753,6 +794,8 @@ void createJavaThread(Object *jThread, long long stack_size) {
 
     pthread_mutex_lock(&lock);
 
+	// 等待子线程启动运行，子线程启动之后会调用pthread_cond_broadcast()
+	// 来通知父线程。
     /* Wait for thread to start */
     while(classlibGetThreadState(thread) == CREATING)
         pthread_cond_wait(&cv, &lock);
@@ -787,6 +830,7 @@ void detachJNIThread(Thread *thread) {
     detachThread(thread);
 }
 
+// 将thread加入到线程组然后运行start函数
 static void *shell(void *args) {
     void *start = ((void**)args)[1];
     Thread *self = ((Thread**)args)[2];
@@ -804,6 +848,12 @@ static void *shell(void *args) {
     return NULL;
 }
 
+/*
+	创建VM线程:
+		- 创建VM level thread对象，这是线程在VM中的表示
+		- 创建pthread线程
+		- 等待新线程运行，当前线程才能继续运行
+*/
 void createVMThread(char *name, void (*start)(Thread*)) {
     Thread *thread = sysMalloc(sizeof(Thread));
     void **args = sysMalloc(3 * sizeof(void*));
@@ -816,8 +866,9 @@ void createVMThread(char *name, void (*start)(Thread*)) {
     memset(thread, 0, sizeof(Thread));
     pthread_create(&tid, &attributes, shell, args);
 
+	// 这算是自旋锁吗，检查子线程状态，一旦不再是CREATING，
+	// 父线程就自动停止等待而开始正常运行了
     /* Wait for thread to start */
-
     pthread_mutex_lock(&lock);
     while(classlibGetThreadState(thread) == CREATING)
         pthread_cond_wait(&cv, &lock);
@@ -1006,6 +1057,8 @@ static void suspendLoop(Thread *thread) {
     sigdelset(&mask, SIGUSR1);
     sigdelset(&mask, SIGTERM);
 
+	// sigsuspend(): 将进程信号集设置为参数指定的信号集，然后挂起进程，
+	// 这里的意思是"屏蔽除SIGUSR1和SIGTERM之外的其他信号"
     while(thread->suspend && old_state == SUSP_NONE)
         sigsuspend(&mask);
 
@@ -1019,7 +1072,16 @@ static void suspendHandler(int sig) {
 }
 
 /* The "slow" disable.  Normally used when a thread enters
-   a blocking code section, such as waiting on a lock.  */
+   a blocking code section, such as waiting on a lock.
+
+   在初始化signal的时候已经设置为只接受SIGUSR1信号，
+   并且重定义该信号的行为:
+   		收到SIGUSR1信号就挂起进程(但是如何恢复呢?)
+
+   所以，
+   		- disable suspend 只需屏蔽该信号(忽略之)
+   		- enable  suspend 只需接受该信号
+ */
 
 void disableSuspend0(Thread *thread, void *stack_top) {
     sigset_t mask;
@@ -1137,12 +1199,24 @@ void printThreadsDump(Thread *self) {
 static void initialiseSignalMask() {
     sigset_t mask;
 
+	// 清空
     sigemptyset(&mask);
+	// 添加quit signal
     sigaddset(&mask, SIGQUIT);
+	// 添加终端终端信号，如Ctrl+C
     sigaddset(&mask, SIGINT);
+	// 添加管道信号
     sigaddset(&mask, SIGPIPE);
+	// 最后把信号集设置生效，
+	// SIG_BLOCK表示要屏蔽这些信号
     sigprocmask(SIG_BLOCK, &mask, NULL);
 }
+
+/*
+	最终的结果就是: 
+		- 屏蔽SIGQUIT, SIGINT, SIGPIPE( initialiseSignalMask())
+		- 重置SIGUSR1的行为: 收到SIGUSR1信号就挂起(suspendHandler())
+*/
 
 static int initialiseSignals() {
     struct sigaction act;
@@ -1153,11 +1227,17 @@ static int initialiseSignals() {
     initialiseSignalMask();
 
     /* Setup signal handler for thread suspension.  Signal
-       handlers are process-wide */
+       handlers are process-wide.
 
+       重置SIGUSR1的行为
+     */
     act.sa_handler = suspendHandler;
+	// sa_mask指定一个信号集，在handler执行期间这些信号被加入
+	// 到进程信号集中。想像一下handler正在执行，进程又收到其他信号这种情形。
     sigemptyset(&act.sa_mask);
+	// 
     act.sa_flags = SA_RESTART;
+	// 为SIGUSR1信号设置action，当前进程收到SIGUSR1信号后将执行act.sa_handler函数
     sigaction(SIGUSR1, &act, NULL);
 
     /* Do classlib specific initialisation */
@@ -1168,6 +1248,7 @@ static int initialiseSignals() {
 
 extern void scanThread(Thread *thread);
 
+// GC扫描线程
 void scanThreads() {
     Thread *thread;
 
@@ -1177,6 +1258,7 @@ void scanThreads() {
     pthread_mutex_unlock(&lock);
 }
 
+// 正在run的线程不是当前线程，那么系统就不是idle的，否则就是。
 int systemIdle(Thread *self) {
     Thread *thread;
 
@@ -1187,6 +1269,7 @@ int systemIdle(Thread *self) {
     return TRUE;
 }
 
+// 根据tid，从线程队列中找到对应的Thread object
 Thread *findRunningThreadByTid(int tid) {
     Thread *thread, *self = threadSelf();
 
@@ -1202,6 +1285,7 @@ Thread *findRunningThreadByTid(int tid) {
     return thread;
 }
 
+// 把线程队列中每个线程对应的Java level thread对象拿出来，组成一个数组。
 Object *runningThreadObjects() {
     Class *array_class = findArrayClass("[Ljava/lang/Thread;");
     Thread *thread, *self = threadSelf();
@@ -1251,6 +1335,7 @@ void exitVM(int status) {
     jamvm_exit(status);
 }
 
+// 等待所有non-deamon线程退出
 void mainThreadWaitToExitVM() {
     Thread *self = threadSelf();
     TRACE("Waiting for %d non-daemon threads to exit\n", non_daemon_thrds);
@@ -1266,6 +1351,7 @@ void mainThreadWaitToExitVM() {
     enableSuspend(self);
 }
 
+// 给Java level线程对象设置contextClassLoader域
 void mainThreadSetContextClassLoader(Object *loader) {
     FieldBlock *fb = findField(thread_class, SYMBOL(contextClassLoader),
                                              SYMBOL(sig_java_lang_ClassLoader));

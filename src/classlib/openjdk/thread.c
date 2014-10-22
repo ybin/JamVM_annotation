@@ -174,11 +174,15 @@ static sem_t signal_sem;
 static MethodBlock *signal_dispatch_mb;
 static sig_atomic_t pending_signals[NSIG];
 
+// 收到信号之后记录在案
 void signalHandler(int sig) {
     pending_signals[sig] = TRUE;
     sem_post(&signal_sem);
 }
 
+/*
+	遍历pending_signals[]数组处理信号: 有则处理，无则继续循环。
+*/
 void classlibSignalThread(Thread *self) {
     int sig;
 
@@ -188,10 +192,13 @@ void classlibSignalThread(Thread *self) {
             sem_wait(&signal_sem);
 
             for(sig = 0; sig < NSIG && !pending_signals[sig]; sig++);
-        } while(sig == NSIG);
+        } while(sig == NSIG); // 遍历完一遍之后再次启动一轮遍历
 
         pending_signals[sig] = FALSE;
 
+		// 收到SIGQUIT就dump thread，
+		// 其他信号就调用sun.misc.Signal.dispatch(int sig)进行处理
+		// 见classlibInitialiseSignals()函数
         if(sig == SIGQUIT)
             printThreadsDump(self);
         else {
@@ -205,6 +212,10 @@ void classlibSignalThread(Thread *self) {
     }
 }
 
+/*
+	重置SIGQUIT信号的action为signalHandler()，
+	该函数会将收到的signal记录到pending_signals[]中
+*/
 int classlibInitialiseSignals() {
     struct sigaction act;
     Class *signal_class;

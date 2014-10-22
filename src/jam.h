@@ -702,7 +702,15 @@ typedef struct classblock {
    ConstantPool constant_pool;
    CLASSLIB_CLASS_EXTRA_FIELDS
 } ClassBlock;
-
+/*
+	栈帧结构:
+		- method block指针
+		- last pc
+		- method variable(lvars)
+		- prev frame pointer
+		- 下一个frame的可用空间(ostack, otherstack)，
+		  创建新的frame时将从这里开始
+*/
 typedef struct frame {
    CodePntr last_pc;
    uintptr_t *lvars;
@@ -719,6 +727,14 @@ typedef struct jni_frame {
    struct frame *prev;
 } JNIFrame;
 
+/*
+	Execute Environment.
+	一个执行环境包括:
+		- 执行的线程(java level thread)
+		- 当前栈(stack)
+		- 当前帧(last frame)
+		- 当前异常(exception)
+*/
 typedef struct exec_env {
     Object *exception;
     char *stack;
