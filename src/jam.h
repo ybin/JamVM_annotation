@@ -706,7 +706,7 @@ typedef struct classblock {
 	栈帧结构:
 		- method block指针
 		- last pc
-		- method variable(lvars)
+		- method variable(lvars, local variables)
 		- prev frame pointer
 		- 下一个frame的可用空间(ostack, otherstack)，
 		  创建新的frame时将从这里开始
@@ -721,7 +721,7 @@ typedef struct frame {
 
 typedef struct jni_frame {
    Object **next_ref;
-   Object **lrefs;
+   Object **lrefs; // local refs
    uintptr_t *ostack;
    MethodBlock *mb;
    struct frame *prev;

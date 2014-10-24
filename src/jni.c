@@ -1346,6 +1346,7 @@ PRIM_ARRAY_OP(Double, jdouble, T_DOUBLE);
         ARRAY(op, Float, type),               \
         ARRAY(op, Double, type)
 
+// native interface，供jni代码调用的函数接口
 struct _JNINativeInterface Jam_JNINativeInterface = {
     NULL,
     NULL,
@@ -1506,6 +1507,7 @@ jint Jam_GetEnv(JavaVM *vm, void **penv, jint version) {
     return JNI_OK;
 }
 
+// 虚拟机接口，JNI操作虚拟机的接口
 struct _JNIInvokeInterface Jam_JNIInvokeInterface = {
     NULL,
     NULL,
@@ -1526,6 +1528,7 @@ jint JNI_GetDefaultJavaVMInitArgs(void *args) {
     return JNI_OK;
 }
 
+// parse command line arguments, 类似于parseCommandLine()[jam.c]
 jint parseInitOptions(JavaVMInitArgs *vm_args, InitArgs *args) {
     Property props[vm_args->nOptions];
     int i;
@@ -1601,6 +1604,7 @@ error:
     return JNI_ERR;
 }
 
+// 这里是虚拟机入口
 jint JNI_CreateJavaVM(JavaVM **pvm, void **penv, void *args) {
     JavaVMInitArgs *vm_args = (JavaVMInitArgs*) args;
     InitArgs init_args;

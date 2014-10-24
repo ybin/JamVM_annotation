@@ -806,6 +806,7 @@ void createJavaThread(Object *jThread, long long stack_size) {
 
 static void initialiseSignalMask();
 
+// 创建一个新的thread
 Thread *attachJNIThread(char *name, char is_daemon, Object *group) {
     Thread *thread = sysMalloc(sizeof(Thread));
     void *stack_base = nativeStackBase();
@@ -824,6 +825,7 @@ Thread *attachJNIThread(char *name, char is_daemon, Object *group) {
     return attachThread(name, is_daemon, stack_base, thread, group);
 }
 
+// 销毁thread
 void detachJNIThread(Thread *thread) {
     /* The JNI spec says we should release all locks held by this thread.
        We don't do this (yet), and only remove the thread from the VM. */

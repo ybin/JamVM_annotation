@@ -37,6 +37,17 @@
 #include "class.h"
 #include "classlib.h"
 
+/*
+	整个文件分为 7 部分: (JamVM最大的文件)
+		- mark 部分
+		- sweep 部分
+		- compact 部分
+		- garbage collect 部分
+		- finalization 部分
+		- gc helper 部分
+		- allocation 部分
+ */
+
 /* Trace GC heap mark/sweep phases - useful for debugging heap
  * corruption */
 #ifdef TRACEGC
@@ -108,6 +119,7 @@ static int verbosegc;
 static int compact_override;
 static int compact_value;
 
+// 整个heap由一个Chunk列表组成
 /* Format of an unallocated chunk */
 typedef struct chunk {
     uintptr_t header;
@@ -115,7 +127,9 @@ typedef struct chunk {
 } Chunk;
 
 /* The free list head, and next allocation pointer */
+// 空闲的Chunk列表
 static Chunk *freelist;
+// 为对象分配heap空间时，从chunkpp开始寻找合适的Chunk
 static Chunk **chunkpp = &freelist;
 
 /* Heap limits */
@@ -130,18 +144,24 @@ static unsigned long heapfree;
 static unsigned int *markbits;
 static int markbit_size;
 
+// 被marked的对象(即需要保留的对象)被放到一个栈中，
+// 然后把剩余的清理掉
 /* The mark stack is fixed size.  If it overflows (which
    shouldn't normally happen except in extremely nested
    structures), marking falls back to a slower heap scan */
 #define MARK_STACK_SIZE 16384
+// marked的对象实在是太多了，超过MARK_STACK_SIZE个了，overflow了
 static int mark_stack_overflow;
+// mark stack中已经存放的object个数
 static int mark_stack_count = 0;
+// 我们的mark stack
 static Object *mark_stack[MARK_STACK_SIZE];
 
 /* The mark heap scan pointer.  Reduces mark stack usage
    by limiting marking to a region of the heap */
 static char *mark_scan_ptr;
 
+// 需要调用finalize()函数的object组成的列表
 /* List holding objects which need to be finalized */
 static Object **has_finaliser_list = NULL;
 static int has_finaliser_count     = 0;
@@ -229,36 +249,57 @@ void gcMemFree(void *addr);
 static int sys_page_size;
 
 /* The possible ways in which a reference may be marked in
-   the mark bit array */
+   the mark bit array.
+
+   mark的类型:(一个mark占用2个比特)
+   	00: not marked
+   	01: phantom mark
+   	10: finalizer mark
+   	11: hard mark
+ */
 #define HARD_MARK               3
 #define FINALIZER_MARK          2
 #define PHANTOM_MARK            1
 
 #define LIST_INCREMENT          100
 
-/* 1 mark entry for every OBJECT_GRAIN bytes of heap */
-#define LOG_BYTESPERMARK        LOG_OBJECT_GRAIN
+/*
+	LOG_xxx 的意思:
+		LOG_xxx = log(xxx)
+	例如，
+		BITSPERMARK = 2
+		LOG_BITSPERMARK = log(2) = 1
 
+		MARKSIZEBITS = 32
+		LOG_MARKSIZEBITS = log(32) = 5
+ */
+ 
+/* 1 mark entry for every OBJECT_GRAIN bytes of heap */
+// 每8个字节用一个mark？
+#define LOG_BYTESPERMARK        LOG_OBJECT_GRAIN
+// 一个mark占用2个比特?
 #define BITSPERMARK             2
 #define LOG_BITSPERMARK         1
-#define LOG_MARKSIZEBITS        5
 #define MARKSIZEBITS            32
+#define LOG_MARKSIZEBITS        5
 
 /* Macros for manipulating the mark bit array */
-
+// 根据ptr，计算出其在markbits[]中对应到哪个item
 #define MARKENTRY(ptr)     ((((char*)ptr)-heapbase)>> \
                            (LOG_BYTESPERMARK+LOG_MARKSIZEBITS-LOG_BITSPERMARK))
-
+// 根据ptr，计算出mark bits(2个bit)在item(markbit[]的item是unsigned int类型)中的偏移，
+// 这个偏移应该总是0才对吧
 #define MARKOFFSET(ptr)    ((((((char*)ptr)-heapbase)>>LOG_BYTESPERMARK)& \
-                           ((MARKSIZEBITS>>LOG_BITSPERMARK)-1)) \
+                           ((MARKSIZEBITS>>LOG_BITSPERMARK)-1)) \ /* 4个1: 1111 */
                             <<LOG_BITSPERMARK)
 
-#define MARK(ptr,mark)     markbits[MARKENTRY(ptr)]|=mark<<MARKOFFSET(ptr);
-
+// 在原mark的基础上增加mark，结果是两种mark的叠加
+#define MARK(ptr,mark)     markbits[MARKENTRY(ptr)] |= mark<<MARKOFFSET(ptr);
+// 清空原来的mark，重新设置新的mark类型
 #define SET_MARK(ptr,mark) markbits[MARKENTRY(ptr)]= \
-                           (markbits[MARKENTRY(ptr)]& \
-                           ~(((1<<BITSPERMARK)-1)<<MARKOFFSET(ptr)))| \
-                           mark<<MARKOFFSET(ptr)
+                           (markbits[MARKENTRY(ptr)]& \ /*原来的mark类型*/
+                           ~(((1<<BITSPERMARK)-1)<<MARKOFFSET(ptr)))| \ /*清空*/
+                           mark<<MARKOFFSET(ptr) /*设置新的mark类型*/
 
 #define IS_MARKED(ptr)     ((markbits[MARKENTRY(ptr)]>> \
                            MARKOFFSET(ptr))&((1<<BITSPERMARK)-1))
@@ -266,17 +307,55 @@ static int sys_page_size;
 #define IS_HARD_MARKED(ptr)      (IS_MARKED(ptr) == HARD_MARK)
 #define IS_PHANTOM_MARKED(ptr)   (IS_MARKED(ptr) == PHANTOM_MARK)
 
+// 一个ptr是否表示一个object，只要看看它的位置以及看看它是否是8字节对齐的即可
 #define IS_OBJECT(ptr)  (((char*)ptr) > heapbase) && \
                         (((char*)ptr) < heaplimit) && \
                         !(((uintptr_t)ptr)&(OBJECT_GRAIN-1))
-
-#define MIN_OBJECT_SIZE ((sizeof(Object)+HEADER_SIZE+OBJECT_GRAIN-1)& \
+// 一个对象的最小尺寸: 8 + 4 = 12 ~= 16(对齐)
+#define MIN_OBJECT_SIZE ((sizeof(Object) + HEADER_SIZE + OBJECT_GRAIN-1)& \
                         ~(OBJECT_GRAIN-1))
+/*
+	一个object在内存中是这个样子的:
+
+		+--------+-----------------+ 0
+		| 		 | lock(uintptr_t) |
+		| Object +-----------------+ 3
+		| 		 | Class *		   |
+		+--------+-----------------+ 7
+		|    header (uintptr_t)	   |
+		+--------+-----------------+ 11
+		|   object content(maybe)  |
+		+--------------------------+ N
+
+	header的样子如下:
+
+	 31   30					2	1	0
+	+---+---+-----------------+---+---+---+
+	| X | X |    block size   | X | X | X |
+	+---+---+-----------------+---+---+---+
+	  ^   ^                     ^   ^   ^
+	  |	  hashcode taken bit	|	|	allock bit
+	  has hashcode bit			|	flc bit
+								special bit
+ */
 
 void allocMarkBits() {
+	/*
+		VM heap总共有heaplimit-heapbase个字节，每个mark能标注8个字节，而每个mark
+		本身占用2个比特，所以整个VM heap需要多少个bit呢?
+		number of bits = (heap size / 8) * 2
+		即，VM heap需要heap size / 8个mark，每个mark占用2比特。
+	 */
     int no_of_bits = (heaplimit-heapbase)>>(LOG_BYTESPERMARK-LOG_BITSPERMARK);
 
+	/*
+		下面这句话相当于: number of bits / 32 = number of bits / (4 * 8)，
+		它的意思是说: 这么多比特，需要多少个unsigned int呢?
+		即，所有的mark bits如果用unsigned int来表示的话，需要markbit_size个unsigned int才行
+	 */
     markbit_size = (no_of_bits+MARKSIZEBITS-1)>>LOG_MARKSIZEBITS;
+	
+	// 分配内存，markbit_size个unsigned int转换为字节数是多少呢?
     markbits = sysMalloc(markbit_size * sizeof(*markbits));
 
     TRACE_GC("Allocated mark bits - size is %d\n", markbit_size);
@@ -2351,6 +2430,8 @@ void freePendingFrees() {
 
 
 /* ------ Allocation from system heap ------- */
+// 从OS heap中分配内存，如加载类时为Class object分配内存，
+// 对比从VM heap中分配内存。
 
 void *sysMalloc(int size) {
     int n = size < sizeof(void*) ? sizeof(void*) : size;

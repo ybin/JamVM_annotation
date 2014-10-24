@@ -94,7 +94,8 @@ char *nativeLibMapName(char *name) {
 char *nativeJVMPath() {
     Dl_info info;
     char *path;
-
+	
+	// 定位nativeJVMPath这个符号所在的文件(jvm.so)的文件路径
     if(dladdr(nativeJVMPath, &info) == 0) {
         printf("Error: dladdr failed.  Aborting VM\n");
         exitVM(1);
