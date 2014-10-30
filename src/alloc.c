@@ -1161,9 +1161,17 @@ void handleUnmarkedSpecial(Object *ob) {
                 classlibHandleUnmarkedSpecial(ob);
 }
 
+/*
+	sweep: gc的sweep阶段。
+
+	sweep阶段主要完成两件事情:
+		- 未标记的chunk设置为空闲状态
+		- 如果多个空闲chunk是连续的，则合并它们
+ */
 static uintptr_t doSweep(Thread *self) {
     char *ptr;
-    Chunk newlist;
+    Chunk newlist; // 新空闲列表表头
+    // last记录新列表的最后一个，新空闲chunk都加到list末尾
     Chunk *curr = NULL, *last = &newlist;
 
     /* Will hold the size of the largest free chunk
@@ -1178,7 +1186,8 @@ static uintptr_t doSweep(Thread *self) {
 
     /* Scan the heap and free all unmarked objects by reconstructing
        the freelist.  Add all free chunks and unmarked objects and
-       merge adjacent free chunks into contiguous areas */
+       merge adjacent free chunks into contiguous areas. 
+     */
 
     for(ptr = heapbase; ptr < heaplimit; ) {
         uintptr_t hdr = HEADER(ptr);
@@ -1200,7 +1209,9 @@ static uintptr_t doSweep(Thread *self) {
             if(HDR_SPECIAL_OBJ(hdr) && ob->class != NULL)
                 handleUnmarkedSpecial(ob);
 
-            /* Clear any set flag bits within the header */
+            /* Clear any set flag bits within the header.
+            	当前这个chunk恢复为空闲状态，即sweep it。
+             */
             curr->header &= HDR_FLAGS_MASK;
 
             TRACE_GC("FREE: Freeing ob @%p class %s - start of block\n", ob,
@@ -1212,8 +1223,11 @@ static uintptr_t doSweep(Thread *self) {
         }
         
         /* Scan the next chunks - while they are
-           free, merge them onto the first free
-           chunk */
+           free, merge them onto the first free chunk.
+           看看下一个chunk(或者多个chunk，如果它们是连续的，unmarked的话)，
+           如果也是unmarked的，那么就合并成一个大的chunk，后续的chunk
+           都合入curr chunk，合并过程其实就是一个size增加的过程而已。
+         */
 
         for(;;) {
             ptr += size;
@@ -1229,6 +1243,7 @@ static uintptr_t doSweep(Thread *self) {
                 if(IS_MARKED(ob))
                     break;
 
+				// 合并unmarked的chunk
                 freed += size;
                 unmarked++;
 
@@ -1239,16 +1254,20 @@ static uintptr_t doSweep(Thread *self) {
                          ob, ob->class ? CLASS_CB(ob->class)->name : "?", curr);
 
             } else {
+            	// 合并unalloced的chunk
                 TRACE_GC("FREE: unalloced block @%p size %d - merging onto block @%p\n",
                          ptr, size, curr);
                 size = hdr;
             }
 
+			// 这就merge了? 是的，这就merge了!!!
             curr->header += size;
         }
 
         /* Scanned to next marked object see
-           if it's the largest so far */
+           if it's the largest so far.
+           找到最大的那个chunk，用于表示gc之后是否能够满足分配要求。
+         */
         if(curr->header > largest)
             largest = curr->header;
 
@@ -1268,7 +1287,9 @@ marked:
         if(HDR_SPECIAL_OBJ(hdr) && ob->class != NULL && handleMarkedSpecial(ob))
             cleared++;
 
-        /* Skip to next block */
+        /* Skip to next block.
+        	如果当前chunk是marked的，就跳过去，看下一个。
+         */
         ptr += size;
 
         if(ptr >= heaplimit)
@@ -1294,14 +1315,19 @@ out_last_free:
 out_last_marked:
 
     /* We've now reconstructed the freelist, set freelist
-       pointer to new list */
+       pointer to new list.
+       设置freelist指向新的空闲列表
+     */
     last->next = NULL;
     freelist = newlist.next;
 
     /* Reset next allocation block to beginning of list -
-       this leads to a search - use largest instead? */
+       this leads to a search - use largest instead? 
+       设置chunkpp，它永远指向当前可分配的空闲列表
+     */
     chunkpp = &freelist;
 
+	// 打印统计信息
     if(verbosegc) {
         long long size = heaplimit-heapbase;
         long long pcnt_used = ((long long)heapfree)*100/size;
@@ -1316,7 +1342,9 @@ out_last_marked:
     }
 
     /* Return the size of the largest free chunk in heap - this
-       is the largest allocation request that can be satisfied */
+       is the largest allocation request that can be satisfied.
+       返回最大空闲chunk的size，以表明是否能满足分配要求。
+     */
 
     return largest;
 }
