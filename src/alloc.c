@@ -248,53 +248,98 @@ void gcMemFree(void *addr);
 /* Cached system page size (used in above functions) */
 static int sys_page_size;
 
-/* The possible ways in which a reference may be marked in
-   the mark bit array.
+/*
+	mark相关的数据结构及算法。
 
-   mark的类型:(一个mark占用2个比特)
-   	00: not marked
-   	01: phantom mark
-   	10: finalizer mark
-   	11: hard mark
+	LOG_xxx 的意思:
+		LOG_xxx = log(xxx)
+
+  	mark的类型:(一个mark占用2个比特)
+	   	00: not marked
+	   	01: phantom mark
+	   	10: finalizer mark
+	   	11: hard mark
+
+	对象粒度(OBJECT_GRAIN)为8字节，即对象按照8字节对齐
+
+	每8个字节用一个mark来标识，mark本身占用2个比特，即
+		LOG_BYTESPERMARK = 3, BYTESPERMARK = 2^3 = 8 (bytes)
+		LOG_BITSPERMARK = 1, BITSPERMARK = 2^1 = 2 (bits)
+	然而这些mark要用什么数据结构来保存呢? C中最小的char也要一个字节，
+	保存一个mark太浪费了，这里使用unsigned int数组(markbits数组)来保存mark，
+	但是并非一个uint保存一个mark，而是使用稍微复杂一点儿的算法，
+	让所有的mark一个个挨着填满uint，即一个uint保存4*8/2=16个mark，
+
+		+--------------------------+
+		|	unsigned int(4 bytes)  |
+		+---+---+---+--------+--+--+
+		|m15|m14|m13| ...... |m1|m0|
+		+---+---+---+--------+--+--+
+	 	31  29  27  25		 3  1  0
+
+	因此，实际保存mark的数据结构是一个数组，每个元素的大小为4*8=32 bits，即，
+		LOG_MARKSIZEBITS = 5, MARKSIZEBITS = 2^5 = 32 bits
+
+	这样一来就需要定位mark位置的方法，如已知一个对象指针ptr，我们
+	要知道它的mark位于markbits数组哪个item中，又因为一个item是4个字节，
+	可以保存16个mark，我们还需要知道ptr的mark在其所在的item中的偏移量，
+	另外还需要一些方便的宏来快速设置mark，以及判断一个ptr是否已经被marked了，
+	这些就是下面的宏所做的事情，
+
+	MARKENTRY宏: ptr => index of mark in 'markbits' array，其算法是这样:
+		ptr - heapbase得到ptr在heap中的偏移，然后除以BYTESPERMARK(8)
+		(即右移LOG_BYTESPERMARK)，得到mark的索引，然后再除以
+		32/2=16(即右移LOG_MARKSIZEBITS-LOG_BITSPERMARK=4)，因为
+		markbits数组的一个元素保存16个mark，这样就得到ptr对应的mark
+		在markbits数组的哪个元素中了。
+
+		例如，
+			假设ptr-heapbase=136，那么标注该ptr的mark就是第136/8=17个，
+			该mark映射到markbits数组中的哪个元素呢? 17/16=1，即该mark
+			位于markbits[1]中。
+	
+	MARKOFFSET宏: ptr => offset of mark in item of 'markbits' arry，即
+		mark在markbits数组的某个元素中的偏移(因为一个元素可以保存16个mark)，
+		其算法是这样的: 
+		ptr - heapbase / 8得到mark的索引，然后对16取余数得到mark在
+		markbits数组某一个元素(其中有16个mark)中是第几个，然后再乘以2，
+		因为一个mark占用两个比特，就得到mark在markbits数组某个元素中
+		的具体偏移量了。
+
+		例如，
+			假设ptr-heapbase=136，那么标注该ptr的mark就是第136/8=17个，
+			然后17%16=1，即该mark在markbits数组的某个元素的16个mark中
+			是第1个，然后1<<1(LOG_BITSPERMARK)=2，即该mark占用2,3两个比特。
+
+	最后set mark以及判断对象是否marked就可以根据上面两个宏来进行了，不再赘述。
  */
+
+
+/* The possible ways in which a reference may be marked in
+   the mark bit array */
 #define HARD_MARK               3
 #define FINALIZER_MARK          2
 #define PHANTOM_MARK            1
 
 #define LIST_INCREMENT          100
 
-/*
-	LOG_xxx 的意思:
-		LOG_xxx = log(xxx)
-	例如，
-		BITSPERMARK = 2
-		LOG_BITSPERMARK = log(2) = 1
-
-		MARKSIZEBITS = 32
-		LOG_MARKSIZEBITS = log(32) = 5
- */
- 
 /* 1 mark entry for every OBJECT_GRAIN bytes of heap */
-// 每8个字节用一个mark？
 #define LOG_BYTESPERMARK        LOG_OBJECT_GRAIN
-// 一个mark占用2个比特?
 #define BITSPERMARK             2
 #define LOG_BITSPERMARK         1
 #define MARKSIZEBITS            32
 #define LOG_MARKSIZEBITS        5
 
 /* Macros for manipulating the mark bit array */
-// 根据ptr，计算出其在markbits[]中对应到哪个item
 #define MARKENTRY(ptr)     ((((char*)ptr)-heapbase)>> \
                            (LOG_BYTESPERMARK+LOG_MARKSIZEBITS-LOG_BITSPERMARK))
-// 根据ptr，计算出mark bits(2个bit)在item(markbit[]的item是unsigned int类型)中的偏移，
-// 这个偏移应该总是0才对吧
 #define MARKOFFSET(ptr)    ((((((char*)ptr)-heapbase)>>LOG_BYTESPERMARK)& \
-                           ((MARKSIZEBITS>>LOG_BITSPERMARK)-1)) \ /* 4个1: 1111 */
+                           ((MARKSIZEBITS>>LOG_BITSPERMARK)-1)) \
                             <<LOG_BITSPERMARK)
 
 // 在原mark的基础上增加mark，结果是两种mark的叠加
 #define MARK(ptr,mark)     markbits[MARKENTRY(ptr)] |= mark<<MARKOFFSET(ptr);
+
 // 清空原来的mark，重新设置新的mark类型
 #define SET_MARK(ptr,mark) markbits[MARKENTRY(ptr)]= \
                            (markbits[MARKENTRY(ptr)]& \ /*原来的mark类型*/
@@ -317,17 +362,17 @@ static int sys_page_size;
 /*
 	一个object在内存中是这个样子的:
 
-		+--------+-----------------+ 0
-		| 		 | lock(uintptr_t) |
-		| Object +-----------------+ 3
-		| 		 | Class *		   |
-		+--------+-----------------+ 7
-		|    header (uintptr_t)	   |
-		+--------+-----------------+ 11
-		|   object content(maybe)  |
-		+--------------------------+ N
+				+--------------------------+
+				| Chunk header (uintptr_t) |
+	Object * -> +--------+-----------------+ 0	\
+				| 		 | lock(uintptr_t) |	|
+				| Object +-----------------+ 3	|
+				| 		 | Class *		   |	| object
+				+--------+-----------------+ 7	|
+				|   object content(maybe)  |	|
+				+--------------------------+ N	/
 
-	header的样子如下:
+	Chunk header的样子如下:
 
 	 31   30					2	1	0
 	+---+---+-----------------+---+---+---+
@@ -337,6 +382,10 @@ static int sys_page_size;
 	  |	  hashcode taken bit	|	|	allock bit
 	  has hashcode bit			|	flc bit
 								special bit
+
+	Chunk是VM内部用来记录未分配的heap空间的，当一个Chunk分配之后，
+	其next部分就被object的内存覆盖了，待回收该Chunk之后该部分会再次被复写，
+	但是header部分是一直保留的，见gcMallc()函数。
  */
 
 void allocMarkBits() {
@@ -365,6 +414,8 @@ void clearMarkBits() {
     memset(markbits, 0, markbit_size * sizeof(*markbits));
 }
 
+// 初始化内存分配模块，这是VM开始运行时的初始化动作之一，见init.c
+// 主要工作就是为VM分配heap内存。
 int initialiseAlloc(InitArgs *args) {
     char *mem = (char*)mmap(0, args->max_heap, PROT_READ|PROT_WRITE,
                                                MAP_PRIVATE|MAP_ANON, -1, 0);
@@ -374,7 +425,10 @@ int initialiseAlloc(InitArgs *args) {
         return FALSE;
     }
 
-    /* Align heapbase so that start of heap + HEADER_SIZE is object aligned */
+    /* Align heapbase so that start of heap + HEADER_SIZE is object aligned.
+
+    	注意: heap + HEADER_SIZE(而非heap)是8字节对齐的
+     */
     heapbase = (char*)(((uintptr_t)mem+HEADER_SIZE+OBJECT_GRAIN-1)&
                ~(OBJECT_GRAIN-1))-HEADER_SIZE;
 
@@ -382,7 +436,9 @@ int initialiseAlloc(InitArgs *args) {
     heaplimit = heapbase+((args->min_heap-(heapbase-mem))&~(OBJECT_GRAIN-1));
     heapmax = heapbase+((args->max_heap-(heapbase-mem))&~(OBJECT_GRAIN-1));
 
-    /* Set initial free-list to one block covering entire heap */
+    /* Set initial free-list to one block covering entire heap.
+    	整个heap就是一个大Chunk，
+     */
     freelist = (Chunk*)heapbase;
     freelist->header = heapfree = heaplimit-heapbase;
     freelist->next = NULL;
@@ -406,7 +462,9 @@ int initialiseAlloc(InitArgs *args) {
 }
 
 /* ------------------------- MARK PHASE ------------------------- */
-  
+
+// 注意第一个if判断，这使得只有部分objects会入栈，大大缩减了mark_stack的空间
+// (平均来说会节省一半)
 #define MARK_AND_PUSH(object, mark) {                \
     SET_MARK(object, mark);                          \
                                                      \
@@ -505,6 +563,15 @@ void freeConservativeRoots() {
     conservative_root_count = 0;
 }
 
+/*
+	扫描每一个线程的stack，寻找所有能走到的引用，包括:
+		- java.lang.Thread对象
+		- exception对象(如果有)
+		- C stack referenced object
+		- Java stack referenced object
+
+	所有这些object都被mark为root，供后续进一步扫描使用
+ */
 void scanThread(Thread *thread) {
     ExecEnv *ee = thread->ee;
     Frame *frame = ee->last_frame;
@@ -512,13 +579,21 @@ void scanThread(Thread *thread) {
 
     TRACE_GC("Scanning stacks for thread %p id %d\n", thread, thread->id);
 
-    /* Mark the java.lang.Thread object */
+    /* Mark the java.lang.Thread object
+    	首先Java level的thread对象要mark
+     */
     markConservativeRoot(ee->thread);
 
-    /* Mark any pending exception raised on this thread */
+    /* Mark any pending exception raised on this thread
+    	然后这个线程上抛出的异常(的对象)要mark
+     */
     markConservativeRoot(ee->exception);
 
-    /* Scan the thread's C stack and mark all references */
+    /* Scan the thread's C stack and mark all references
+    	扫描C stack。这个stack是pthread线程的stack，创建pthread线程之后
+    	可以get到这个stack。stack中的每一个指针都要遍历一边，
+    	检查其是否指向VM Heap中。
+     */
     slot = (uintptr_t*)getStackTop(thread);
     end = (uintptr_t*)getStackBase(thread);
 
@@ -529,7 +604,28 @@ void scanThread(Thread *thread) {
             markConservativeRoot(ob);
         }
 
-    /* Scan the thread's Java stack and mark all references */
+    /* Scan the thread's Java stack and mark all references
+    	扫描Java stack。Java stack由Frame组成，首先扫描该Frame里的
+    	method block，并将其所属的类对象mark，然后再扫描该Frame
+    	的操作数栈。Java stack是什么样子的呢?
+
+				Java Stack
+    		+-----------------+
+    		|     frame 0	  |
+    		+-----------------+
+    		| operand stack 0 |
+    		+=================+
+    		|     frame 1	  |
+    		+-----------------+
+    		| operand stack 1 |
+    		+=================+
+    		|      ......	  |
+    		+=================+
+    		|     frame N	  |
+    		+-----------------+
+    		| operand stack N |
+    		+-----------------+
+     */
     slot = frame->ostack + frame->mb->max_stack;
 
     while(frame->prev != NULL) {
@@ -624,6 +720,7 @@ void markClassData(Class *class, int mark) {
     }
 }
 
+// 从一个对象开始，扫描它所引用的所有对象
 void markChildren(Object *ob, int mark, int mark_soft_refs) {
     Class *class = ob->class;
     ClassBlock *cb = CLASS_CB(class);
@@ -631,9 +728,11 @@ void markChildren(Object *ob, int mark, int mark_soft_refs) {
     if(class == NULL)
         return;
 
+	// 首先mark该对象对应的类对象
     if(mark > IS_MARKED(class))
         MARK_AND_PUSH(class, mark);
 
+	// 如果对象是一个数组，标记每一个元素，注意数组对象本身是不会有其他引用的。
     if(cb->name[0] == '[') {
         if((cb->name[1] == 'L') || (cb->name[1] == '[')) {
             Object **body = ARRAY_DATA(ob, Object*);
@@ -655,6 +754,11 @@ void markChildren(Object *ob, int mark, int mark_soft_refs) {
                      ob, cb->name);
         }
     } else {
+    	/*
+    		如果不是数组对象，那么首先判断该对象是否属于特殊类型，
+    		然后处理该对象引用的其他对象。
+		 */
+		
         int i;
 
         if(IS_SPECIAL(cb)) {
@@ -669,6 +773,7 @@ void markChildren(Object *ob, int mark, int mark_soft_refs) {
                 markLoaderClasses(ob, mark);
 
             } else if(IS_REFERENCE(cb)) {
+            	/* 引用类型，如弱引用、虚引用等 */
                 Object *referent = INST_DATA(ob, Object*, ref_referent_offset);
 
                 TRACE_GC("Mark found Reference object @%p class %s"
@@ -758,6 +863,94 @@ void markStack(int mark_soft_refs) {
     }
 }
 
+/* mark: 扫描整个VM heap.
+	
+	简单直观的扫描方法可能是从根对象开始递归扫描所有可达对象。
+
+	但是这样的方法一则效率比较低(递归的函数调用开销比较大)，二则空间消耗太大(栈空间消耗)，
+	所以需要优化。
+	想想当前VM heap是什么样子的呢? heap中的所有空闲区域使用Chunk来记录的，当一个Chunk被
+	分配用于放置object之后，原来Chunk的header是保留的，所以VM heap看起来大致是这个样子的，
+
+			+--------------+
+			| Chunk header |
+			|--------------|
+			|			   |
+			| object block |
+			|			   |
+			+==============+
+			| Chunk header |
+			|--------------|
+			|			   |
+			| object block |
+			|			   |
+			+==============+
+			|    ......	   |
+			+==============+ <--+
+			| Chunk header |	|
+			|     next     |	|
+			|--------------|	|
+			|	unalloced  |	|
+			|	  area	   |	|
+chunkpp -->	+==============+	|
+			| Chunk header |	|
+			|     next     | ---+
+			|--------------|
+			|	unalloced  |
+			|	  area	   |
+			+==============+
+			|   ........   |
+			+--------------+
+
+	这个vm heap由一个个"区域"组成，每个区域(无法占用与否)都有一个header，其中有表示该区域
+	是否被占用，以及区域大小等信息，这样就可以使用一个指针遍历整个vm heap(scanHeap函数中
+	的for循环)。所有未分配的区域用一个list串联起来(chunkpp)。
+
+	开始的时候，vm heap中只有部分区域是被marked的，就是那些root对象"直接"引用的对象，当然
+	可以从这些对象开始递归扫描，但是这需要优化，如何优化呢？
+		- 首先不要递归，改为"基于栈的迭代"，使用mark_stack栈
+		- 其次不要把所有的区域都入栈，因为这有可能导致栈溢出
+	具体做法是:
+
+		void scanHeap() {
+			define mark_stack; // 用来存放扫描的heap block
+			define mark_scan_ptr; // 线性遍历所有heap block
+
+			for(mark_scan_ptr = heapbase; mark_scan_ptr < heaplimit; ) {
+				if( current block NOT alloced ) {
+					mark_scan_ptr += size of current block;
+				} else {
+					markChildren(current block);
+					markStack();
+				}
+			}
+		}
+
+		void markChildren(block) {
+			for( ref : block ) {
+				mark(object of ref); // mark object
+				if( ref < mark_scan_ptr ) { // 只有一部分object入栈，另一部分会在for循环中处理
+					mark_stack.push(ref);
+				}
+			}
+		}
+
+		// mark栈中对象引用的对象，栈中对象都已经mark过了，
+		// 而在markChildren()时又会把新的符合条件的对象入栈，
+		// 这样就完成了迭代过程。
+		void markStack() {
+			if(mark_stack empty)
+				return;
+			block = mark_stack.pop();
+			markChildren(block);
+		}
+
+	如果把markChildren()中的判断条件去掉，就会使所有对象均入栈，即空间占用O(n)，n为object数量，
+	数据量比较大，我们增加判断条件之后，平均就只有"一半"object会入栈，这样会节省空间。
+
+	scanHeap(), markChildren(), markStack()三个函数完成了整个vm heap的扫描。
+	
+ */
 void scanHeap(int mark_soft_refs) {
     for(mark_scan_ptr = heapbase; mark_scan_ptr < heaplimit;) {
         uintptr_t hdr = HEADER(mark_scan_ptr);
@@ -781,6 +974,12 @@ void scanHeap(int mark_soft_refs) {
 }
 
 void scanHeapAndMark(int mark_soft_refs) {
+	/*
+		扫描过程会使得一部分对象入栈(mark_stack)，如果栈空间不够用，
+		会使得部分对象没有被标记，所以需要再次扫描vm heap，以为已经
+		marked的对象是不会入栈的，所以栈空间占用就会大大缩减，知道
+		所有对象都标记完成。
+	 */
     do {
         mark_stack_overflow = 0; 
 
@@ -800,19 +999,41 @@ void scanHeapAndMark(int mark_soft_refs) {
 #define CLEAR_UNMARKED(element) \
     if(element && !IS_MARKED(element)) element = NULL
 
+/*
+	mark阶段的核心。
+
+	mark_soft_refs: TRUE or FALSE，表示是否mark软连接，
+	如果true即表示保留软连接，如果false则表示回收软连接
+ */
 static void doMark(Thread *self, int mark_soft_refs) {
     int i, j;
 
+	// 清空标记数组
     clearMarkBits();
 
+	// 如果有，先把oom对象mark了，因为不知道啥时候就出异常，
+	// 还要用它来抛异常呢
     if(oom) MARK(oom, HARD_MARK);
+
+	/*
+		标记root objects，这些root objects的来源包括:
+			- boot classes, 包括基本类型对应的类对象
+			- jni全局引用
+			- 线程栈里面的引用，包括C stack和Java stack
+	 */
+
     markBootClasses();
+	// 函数实现在哪里?
     markJNIGlobalRefs();
     scanThreads();
 
     /* All roots should now be marked.  Scan the heap and recursively
        mark all marked objects - once the heap has been scanned all
-       reachable objects should be marked */
+       reachable objects should be marked.
+       现在，所有的root object都已经标记完成了，后续就要从这些root object
+       开始扫描整个VM heap，扫描完成之后所有需要标记的对象就都被标记了，
+       其他没有达到的对象就是垃圾了。
+     */
 
     scanHeapAndMark(mark_soft_refs);
 
@@ -1755,6 +1976,8 @@ unsigned long gc0(int mark_soft_refs, int compact) {
         jam_printf("<GC: Mark took %f seconds, %s took %f seconds>\n",
                            mark_time, compact ? "compact" : "scan", scan_time);
     } else {
+    	// mark, sweep, compact，这里才是关键之所在，两种组合类型:
+    	// mark-sweep, mark-compact，无论哪种，都需要首先mark才行。
         doMark(self, mark_soft_refs);
         largest = compact ? doCompact() : doSweep(self);
     }
@@ -1927,6 +2150,13 @@ void referenceHandlerThreadLoop(Thread *self) {
                         "<GC: enqueuing %d references>\n", self, &self);
 }
 
+/* VM初始化的最后阶段初始化gc，见init.c
+   主要工作:
+   	- 实例化java.lang.OutOfMemoryError对象
+   	- 创建finalizer, reference handler, async gc线程(均为VM线程)
+   	- 选择gc方式: mark-sweep/mark-compact
+ */
+
 int initialiseGC(InitArgs *args) {
     /* Pre-allocate an OutOfMemoryError exception object - we throw it
      * when we're really low on heap space, and can create FA... */
@@ -1965,10 +2195,14 @@ int initialiseGC(InitArgs *args) {
 
 /* ------------------------- ALLOCATION ROUTINES  ------------------------- */
 
+// 从VM heap分配内存，必要的时候运行gc
 void *gcMalloc(int len) {
     /* The state determines what action to take in the event of
        allocation failure.  The states go up in seriousness,
-       and are visible to other threads */
+       and are visible to other threads.
+       
+       分配失败的话就运行gc
+     */
     static enum { gc, run_finalizers, throw_oom } state = gc;
 
     int n = (len+HEADER_SIZE+OBJECT_GRAIN-1)&~(OBJECT_GRAIN-1);
@@ -2007,6 +2241,11 @@ void *gcMalloc(int len) {
                 goto got_it;
             }
 
+			/*
+				注意: 未分配的内存用Chunk来表示，分配之后header部分仍然保留
+				(n = len + HEADER_SIZE)，但是当object的内容写入之后，next部分
+				就被覆盖了，待回收之后再重写next部分。
+			 */
             if(len > n) {
                 Chunk *rem;
                 found = *chunkpp;
@@ -2014,7 +2253,10 @@ void *gcMalloc(int len) {
                 rem->header = len - n;
 
                 /* Chain the remainder onto the freelist only
-                   if it's large enough to hold an object */
+                   if it's large enough to hold an object.
+                   如果该Chunk中的剩余部分还能放下一个object的话
+                   就再创建一个Chunk，否则就空着吧。
+                 */
                 if(rem->header >= MIN_OBJECT_SIZE) {
                     rem->next = found->next;
                     *chunkpp = rem;

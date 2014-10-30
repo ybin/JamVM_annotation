@@ -21,6 +21,7 @@
 
 #define HEADER_SIZE		sizeof(uintptr_t)
 #define LOG_OBJECT_GRAIN	3
+// FLC: flat lock contention，一种JVM上使用的lock，日本人发明，首用于IBM JVM实现中
 #define FLC_BIT			2
 
 #define HDR_ADDRESS(obj) (uintptr_t*)(((char*)obj)-HEADER_SIZE)

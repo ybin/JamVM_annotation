@@ -90,7 +90,18 @@ int enqueue_mtbl_idx;
 static HashTable boot_classes;
 
 /* Array large enough to hold all primitive classes -
- * access protected by boot_classes hash table lock */
+ * access protected by boot_classes hash table lock.
+ 	9种基本数据类型对应的类对象:
+ 		boolean	java.lang.Boolean
+ 		byte	java.lang.Byte
+ 		char	java.lang.Character
+ 		short	java.lang.Short
+ 		int		java.lang.Integer
+ 		long	java.lang.Long
+ 		float	java.lang.Float
+ 		double	java.lang.Double
+ 		----	java.lang.Object
+ */
 #define MAX_PRIM_CLASSES 9
 static Class *prim_classes[MAX_PRIM_CLASSES];
 
@@ -2254,6 +2265,7 @@ void markBootClasses() {
 
    hashIterate(boot_classes);
 
+	// 把9中Java基本类型对应的类对象全都mark了
    for(i = 0; i < MAX_PRIM_CLASSES; i++)
        if(prim_classes[i] != NULL)
            markRoot((Object*)prim_classes[i]);

@@ -704,12 +704,11 @@ typedef struct classblock {
 } ClassBlock;
 /*
 	栈帧结构:
-		- method block指针
+		- method block pointer
 		- last pc
 		- method variable(lvars, local variables)
 		- prev frame pointer
-		- 下一个frame的可用空间(ostack, otherstack)，
-		  创建新的frame时将从这里开始
+		- operand stack(ostack)
 */
 typedef struct frame {
    CodePntr last_pc;

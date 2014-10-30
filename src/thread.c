@@ -1250,7 +1250,7 @@ static int initialiseSignals() {
 
 extern void scanThread(Thread *thread);
 
-// GC扫描线程
+// 扫描所有线程
 void scanThreads() {
     Thread *thread;
 
