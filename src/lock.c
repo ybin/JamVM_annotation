@@ -70,6 +70,8 @@
   |                 Monitor*                |1|
   +-----------------------------------------+-+
                                              ^ shape bit
+
+  shape: 表示lock的mode是thin还是fat。
 */
 
 #define SHAPE_BIT   0x1
@@ -81,6 +83,7 @@
 #define TID_SIZE    (32-TID_SHIFT)
 #define TID_MASK    (((1<<TID_SIZE)-1)<<TID_SHIFT)
 
+// 清理monitor，如果它是它不再被使用，那就把它放到空闲队里中。
 #define SCAVENGE(ptr)                                           \
 ({                                                              \
     Monitor *mon = (Monitor *)ptr;                              \
@@ -101,6 +104,8 @@ void monitorInit(Monitor *mon) {
     pthread_mutex_init(&mon->lock, NULL);
 }
 
+// thread加入到mon的等待队列中(加到队尾，即队头的prev位置，因为是双向链表)
+// mon->wait_set是一个Thread的等待队列，这个队列是一个双向列表(doubly list)
 void waitSetAppend(Monitor *mon, Thread *thread) {
     if(mon->wait_set == NULL)
         mon->wait_set = thread->wait_prev = thread;
@@ -112,6 +117,7 @@ void waitSetAppend(Monitor *mon, Thread *thread) {
     thread->wait_id = mon->wait_count++;
 }
 
+// 把thread从mon的等待队列中取出(unlink)
 void waitSetUnlinkThread(Monitor *mon, Thread *thread) {
     if(mon->wait_set == thread)
         if((mon->wait_set = mon->wait_set->wait_next) == thread)
@@ -122,6 +128,7 @@ void waitSetUnlinkThread(Monitor *mon, Thread *thread) {
     thread->wait_prev = thread->wait_next = NULL;
 }
 
+// 取出mon的等待队列中的第一个node，然后signal it。
 Thread *waitSetSignalNext(Monitor *mon) {
     Thread *thread = mon->wait_set;
 
@@ -135,28 +142,39 @@ Thread *waitSetSignalNext(Monitor *mon) {
     return thread;
 }
 
+// lock the monitor
 void monitorLock(Monitor *mon, Thread *self) {
     if(mon->owner == self)
         mon->count++;
     else {
+		// pthread_mutex_trylock跟pthread_mutex_lock的不同之处在于:
+		// 当lock获取失败时，pthread_mutex_trylock返回non-zero值，
+		// 而pthread_mutex_lock导致线程blocked直到lock可用。
         if(pthread_mutex_trylock(&mon->lock)) {
+			// 获取lock失败，本线程已经做好被挂起(blocked)的觉悟了！
             disableSuspend(self);
 
+			// 遗言：本线程是被mon这个lock block的，而且已经被block了blocked_count次了。
             self->blocked_mon = mon;
             self->blocked_count++;
             classlibSetThreadState(self, BLOCKED);
-
+			// 再见了，朋友们，我要全力一拼了，即使是飞蛾扑火也要勇敢前行。。。
             pthread_mutex_lock(&mon->lock);
-
+			
+			// ... ... 此处可能被block很久 ... ...
+			
             classlibSetThreadState(self, RUNNING);
+			// 我胡汉三又回来啦！
             self->blocked_mon = NULL;
 
             enableSuspend(self);
         }
+		// mon是属于我的。。。
         mon->owner = self;
     }
 }
 
+// 能获得mon的芳心最好，否则。。。 天涯何处无芳草啊，爷我另找歪脖子树去，走起。。。
 int monitorTryLock(Monitor *mon, Thread *self) {
     if(mon->owner == self)
         mon->count++;
@@ -169,6 +187,7 @@ int monitorTryLock(Monitor *mon, Thread *self) {
     return TRUE;
 }
 
+// 多次获取lock，只有最后一次释放时才会真的unlock。一次次，我伤了她的心。。。
 void monitorUnlock(Monitor *mon, Thread *self) {
     if(mon->owner == self) {
         if(mon->count == 0) {
@@ -285,6 +304,7 @@ int monitorWait(Monitor *mon, Thread *self, long long ms, int ns,
     return TRUE;
 }
 
+// 把mon的等待队列中的第一个thread唤醒，它是等待时间最长的。
 int monitorNotify(Monitor *mon, Thread *self) {
     if(mon->owner != self)
         return FALSE;
@@ -296,6 +316,7 @@ int monitorNotify(Monitor *mon, Thread *self) {
     return TRUE;
 }
 
+// 把mon的等待队列中所有thread都唤醒，你们自己竞争去吧! 扔个肥皂，赶紧溜。。。
 int monitorNotifyAll(Monitor *mon, Thread *self) {
     if(mon->owner != self)
         return FALSE;
@@ -306,6 +327,7 @@ int monitorNotifyAll(Monitor *mon, Thread *self) {
     return TRUE;
 }
 
+// 创建monitor，如果空闲列表中有闲置的就用闲置的。
 Monitor *allocMonitor(Object *obj) {
     Monitor *mon;
 
@@ -316,6 +338,7 @@ Monitor *allocMonitor(Object *obj) {
         mon = sysMalloc(sizeof(Monitor));
         monitorInit(mon);
     }
+	// monitor是为object分配的哦。
     mon->obj = obj;
     /* No need to wrap in LOCKWORD_WRITE as no thread should
      * be modifying it when it's on the free list */
@@ -336,11 +359,12 @@ Monitor *findMonitor(Object *obj) {
     }
 }
 
+// thin lock转换为fat lock
 static void inflate(Object *obj, Monitor *mon, Thread *self) {
     TRACE("Thread %p is inflating obj %p...\n", self, obj);
     clearFlcBit(obj);
-    monitorNotifyAll(mon, self);
-    LOCKWORD_WRITE(&obj->lock, (uintptr_t) mon | SHAPE_BIT);
+    monitorNotifyAll(mon, self); // inflate之前lock是thin的，所以这个只是清空等待队列而已，它本就应该是空的吧
+    LOCKWORD_WRITE(&obj->lock, (uintptr_t) mon | SHAPE_BIT); // 转换为fat lock
 }
 
 void objectLock(Object *obj) {
@@ -495,10 +519,12 @@ void objectNotify(Object *obj) {
     TRACE("Thread %p Notify on obj %p...\n", self, obj);
 
     if((lockword & SHAPE_BIT) == 0) {
+		// 如果是thin lock，直接退出，thin不会导致等待线程挂起(blocked)，所以无需唤醒。
         int tid = (lockword&TID_MASK)>>TID_SHIFT;
-        if(tid == self->id)
+        if(tid == self->id) // 只有lock的owner才能释放它，如果别人能随便释放lock，岂不乱套了啊！
             return;
     } else {
+    	// 如果是fat lock，就需要notify等待队列中的某个thread
         Monitor *mon = (Monitor*) (lockword & ~SHAPE_BIT);
         if(monitorNotify(mon, self))
             return;
@@ -515,10 +541,12 @@ void objectNotifyAll(Object *obj) {
     TRACE("Thread %p NotifyAll on obj %p...\n", self, obj);
 
     if((lockword & SHAPE_BIT) == 0) {
+		// thin lock，直接退出
         int tid = (lockword&TID_MASK)>>TID_SHIFT;
         if(tid == self->id)
             return;
     } else {
+    	// fat lock，唤醒等待队列中的所有线程
         Monitor *mon = (Monitor*) (lockword & ~SHAPE_BIT);
         if(monitorNotifyAll(mon, self))
             return;
@@ -528,6 +556,7 @@ void objectNotifyAll(Object *obj) {
                     "thread not owner");
 }
 
+// 判断object是否被当前线程锁定了
 int objectLockedByCurrent(Object *obj) {
     uintptr_t lockword = LOCKWORD_READ(&obj->lock);
     Thread *self = threadSelf();
@@ -544,6 +573,7 @@ int objectLockedByCurrent(Object *obj) {
     return FALSE;
 }
 
+// 获取锁定obj的线程对象
 Thread *objectLockedBy(Object *obj) {
     uintptr_t lockword = LOCKWORD_READ(&obj->lock);
     Thread *owner;

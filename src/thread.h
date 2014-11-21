@@ -80,15 +80,15 @@
 typedef struct thread Thread;
 
 typedef struct monitor {
-    pthread_mutex_t lock;
-    Thread *owner;
-    Object *obj;
-    int count;
+    pthread_mutex_t lock; // monitor本质上是一个pthread_mutex_t
+    Thread *owner; // monitor正在被哪个线程lock
+    Object *obj; // monitor所对应的object
+    int count; // 这个monitor被lock了多少次，一个monitor可以被同一个线程lock多次，只有在count为零时才真正unlock it。
     int in_wait;
     uintptr_t entering;
-    int wait_count;
-    Thread *wait_set;
-    struct monitor *next;
+    int wait_count; // 等待队列的长度
+    Thread *wait_set; // 等待队列
+    struct monitor *next; // monitor会被一个空闲队列缓存，提高效率
 } Monitor;
 
 struct thread {
@@ -99,16 +99,20 @@ struct thread {
     void *stack_base;
     Monitor *wait_mon;
     Monitor *blocked_mon;
+	/*
+		wait_mon(wait moniter)有一个由thread组成的双向列表，
+		wait_prev, wait_next就是用于把thread放入该双向列表中时用的。
+	 */
     Thread *wait_prev;
     Thread *wait_next;
-    pthread_cond_t wait_cv;
-    pthread_cond_t park_cv;
+    pthread_cond_t wait_cv; // conditional variable for wait
+    pthread_cond_t park_cv; // conditional variable for park
     pthread_mutex_t park_lock;
     long long blocked_count;
     long long waited_count;
     Thread *prev, *next;
-    unsigned int wait_id;
-    unsigned int notify_id;
+    unsigned int wait_id;   // 在wait_mon的等待队列中的位置，即排第几号
+    unsigned int notify_id; // 在wait_mon的等待队列中，其后还有多少个线程在排队
     char suspend;
     char park_state;
     char interrupted;

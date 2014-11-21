@@ -421,7 +421,7 @@ typedef struct line_no_table_entry {
 typedef struct object Class;
 
 typedef struct object {
-   uintptr_t lock;
+   uintptr_t lock; // lock word的定义见lock.c，thin lock, fat lock对应的lock word定义不同。
    Class *class;
 } Object;
 

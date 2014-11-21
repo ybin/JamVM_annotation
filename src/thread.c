@@ -1044,6 +1044,8 @@ void resumeAllThreads(Thread *self) {
     pthread_mutex_unlock(&lock);
 }
 
+// 该函数在SIGUSR1 handler中调用，实现线程的suspend和resume
+// stop the world, resume the world就靠它了。
 static void suspendLoop(Thread *thread) {
     char old_state = thread->suspend_state;
     sigjmp_buf env;
@@ -1271,7 +1273,7 @@ int systemIdle(Thread *self) {
     return TRUE;
 }
 
-// 根据tid，从线程队列中找到对应的Thread object
+// 根据tid，从线程队列中找到对应的Thread object，如获取锁定obj的线程
 Thread *findRunningThreadByTid(int tid) {
     Thread *thread, *self = threadSelf();
 
