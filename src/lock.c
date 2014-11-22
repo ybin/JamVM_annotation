@@ -198,11 +198,13 @@ void monitorUnlock(Monitor *mon, Thread *self) {
     }
 }
 
+// wait必须首先拿到锁
 int monitorWait(Monitor *mon, Thread *self, long long ms, int ns,
                 int is_wait, int interruptible) {
     char interrupted = interruptible && self->interrupted;
 
     /* Check we own the monitor */
+	// 首先拿到锁才行
     if(mon->owner != self)
         return FALSE;
 
@@ -216,7 +218,10 @@ int monitorWait(Monitor *mon, Thread *self, long long ms, int ns,
         disableSuspend(self);
 
         /* Unlock the monitor.  As it could be recursively
-           locked remember the recursion count */
+           locked remember the recursion count
+           pthread_cond_timedwait()或pthread_cond_wait()会自动释放锁，
+           这里需要把VM层级的变量作设置。
+         */
         old_count = mon->count;
         mon->owner = NULL;
         mon->count = 0;
@@ -367,6 +372,18 @@ static void inflate(Object *obj, Monitor *mon, Thread *self) {
     LOCKWORD_WRITE(&obj->lock, (uintptr_t) mon | SHAPE_BIT); // 转换为fat lock
 }
 
+/*
+	流程如下：
+
+	1. 尝试获取obj的thin lock，成功则返回，失败则继续下一步
+	2. 如果obj的锁是thin lock且拥有锁的线程是本线程，则
+		2.1 如果获取锁的次数小于(1<<COUNT_SIZE)，则增加次数1，返回
+		2.2 如果获取锁的次数大于等于(1<<COUNT_SIZE)，则升级为fat lock，返回
+	3. 如果拥有锁的线程不是本线程(锁可能是thin，可能是fat)，则尝试获取obj对应的monitor，如果没有则创建，
+	4. 拿到monitor锁之后，如果obj当前为thin lock，则再次尝试获取它，否则返回
+	5. 如果为thin lock，并且拿到了锁，则将其升级为fat lock，如果拿不到锁就在monitor上等待(此时我们已经拿到monitor了)
+ */
+
 void objectLock(Object *obj) {
     Thread *self = threadSelf();
     uintptr_t thin_locked = self->id<<TID_SHIFT;
@@ -375,38 +392,49 @@ void objectLock(Object *obj) {
 
     TRACE("Thread %p lock on obj %p...\n", self, obj);
 
+	// 设置成功返回1，失败返回0
     if(LOCKWORD_COMPARE_AND_SWAP(&obj->lock, 0, thin_locked)) {
         /* This barrier is not needed for the thin-locking implementation;
            it's a requirement of the Java memory model. */
         JMM_LOCK_MBARRIER();
+		// 如果成功锁住就达到目的了，走你。。。
         return;
     }
 
+	// 额偶，没锁住，-_-!
     lockword = LOCKWORD_READ(&obj->lock);
     if((lockword & (TID_MASK|SHAPE_BIT)) == thin_locked) {
+		// 好在这是个thin lock并且现在的主人还是当前线程，我们来看看已经锁了多少次了
         int count = lockword & COUNT_MASK;
 
         if(count < (((1<<COUNT_SIZE)-1)<<COUNT_SHIFT))
-            LOCKWORD_WRITE(&obj->lock, lockword + (1<<COUNT_SHIFT));
+            LOCKWORD_WRITE(&obj->lock, lockword + (1<<COUNT_SHIFT)); // 太好了，锁定次数还不是很多，那我们就再锁一次吧
         else {
+			// 尼玛，不能无穷锁下去啊，升级到fat lock吧
             mon = findMonitor(obj);
             monitorLock(mon, self);
             inflate(obj, mon, self);
-            mon->count = 1<<COUNT_SIZE;
+            mon->count = 1<<COUNT_SIZE; // 之前还是thin lock的时候已经锁了(1<<COUNT_SIZE)-1次了
         }
+		// (擦汗...)，还好锁还在当前线程手里，object的lock动作依然是成功的，再次走你。。。
         return;
     }
 
+// 我擦嘞，实在锁不住了啊，lock在别的线程手里啊，而且有可能是thin lock也有可能是fat lock
 try_again:
+	// 首先从哈希表中找到obj对应的monitor，如果没有就创建一个新的
     mon = findMonitor(obj);
 
 try_again2:
+	// 这个判断啥时候会成立? 疑惑!
     if((entering = LOCKWORD_READ(&mon->entering)) == UN_USED)
         goto try_again;
 
+	// 上一句跟这一句组合起来就是: 把mon->entering增加1，CAS可以保证不会出现多个竞争线程
+	// 却只增加了1的情形，它保证: 有几个线程就会增加几。
     if(!(LOCKWORD_COMPARE_AND_SWAP(&mon->entering, entering, entering+1)))
         goto try_again2;
-
+	// 这个判断啥时候会成立啊?!
     if(mon->obj != obj) {
         while(entering = LOCKWORD_READ(&mon->entering),
                         !(LOCKWORD_COMPARE_AND_SWAP(&mon->entering,
@@ -414,15 +442,21 @@ try_again2:
         goto try_again;
     }
 
+	// 开始锁定。。。当然有可能挂起
     monitorLock(mon, self);
 
+	// 好了，终于拿到锁了，把entering再减掉1
     while(entering = LOCKWORD_READ(&mon->entering),
                     !(LOCKWORD_COMPARE_AND_SWAP(&mon->entering,
                                                 entering, entering-1)));
-
+	// 如果obj的lock是个thin lock，还需要额外再处理一下，如果是fat lock，
+	// 上面的操作之后我们已经拿到锁了，无需再处理了。
     while((LOCKWORD_READ(&obj->lock) & SHAPE_BIT) == 0) {
+		// 设置锁的竞争标志位
         setFlcBit(obj);
-
+		// 再次尝试获取thin lock，
+		// 如果成功就立刻把锁升级为fat lock,
+		// 如果失败就再monitor上等待
         if(LOCKWORD_COMPARE_AND_SWAP(&obj->lock, 0, thin_locked))
             inflate(obj, mon, self);
         else

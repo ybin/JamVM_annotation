@@ -85,7 +85,7 @@ typedef struct monitor {
     Object *obj; // monitor所对应的object
     int count; // 这个monitor被lock了多少次，一个monitor可以被同一个线程lock多次，只有在count为零时才真正unlock it。
     int in_wait;
-    uintptr_t entering;
+    uintptr_t entering; // 有多少线程在竞争lock，竞争该monitor的锁但是不应定加入等待队列，只有调用monitorWait()才会进入等待队列
     int wait_count; // 等待队列的长度
     Thread *wait_set; // 等待队列
     struct monitor *next; // monitor会被一个空闲队列缓存，提高效率
@@ -97,8 +97,8 @@ struct thread {
     ExecEnv *ee;
     void *stack_top;
     void *stack_base;
-    Monitor *wait_mon;
-    Monitor *blocked_mon;
+    Monitor *wait_mon; // 当前线程在wait哪个monitor
+    Monitor *blocked_mon; // 当前线程被哪个monitor block了
 	/*
 		wait_mon(wait moniter)有一个由thread组成的双向列表，
 		wait_prev, wait_next就是用于把thread放入该双向列表中时用的。
@@ -108,8 +108,8 @@ struct thread {
     pthread_cond_t wait_cv; // conditional variable for wait
     pthread_cond_t park_cv; // conditional variable for park
     pthread_mutex_t park_lock;
-    long long blocked_count;
-    long long waited_count;
+    long long blocked_count; // 线程被block的次数，用于统计
+    long long waited_count;  // 线程被wait 的次数，用于统计
     Thread *prev, *next;
     unsigned int wait_id;   // 在wait_mon的等待队列中的位置，即排第几号
     unsigned int notify_id; // 在wait_mon的等待队列中，其后还有多少个线程在排队
