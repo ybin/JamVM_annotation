@@ -41,6 +41,7 @@ void unlockHashTable0(HashTable *table, Thread *self) {
     unlockVMLock(table->lock, self);
 }
 
+// 这里应该判断一下，如果new_size == table.hash_size，那就无需resize了。
 void resizeHash(HashTable *table, int new_size) {
     HashEntry *new_table = gcMemMalloc(sizeof(HashEntry)*new_size);
     int i;
