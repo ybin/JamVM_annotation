@@ -472,6 +472,7 @@ void objectUnlock(Object *obj) {
     TRACE("Thread %p unlock on obj %p...\n", self, obj);
 
     if(lockword == thin_locked) {
+		// 如果是thin lock并且count == 0，直接释放；并且通知在monitor上等待的其他线程
         /* This barrier is not needed for the thin-locking implementation;
            it's a requirement of the Java memory model. */
         JMM_UNLOCK_MBARRIER();
@@ -495,21 +496,24 @@ retry:
             monitorUnlock(mon, self);
         }
     } else {
+    	// 如果是thin lock，但是count != 0，则只是减小count值
         if((lockword & (TID_MASK|SHAPE_BIT)) == thin_locked)
             LOCKWORD_WRITE(&obj->lock, lockword - (1<<COUNT_SHIFT));
         else
             if((lockword & SHAPE_BIT) != 0) {
+			 	// 如果是fat lock
                 Monitor *mon = (Monitor*) (lockword & ~SHAPE_BIT);
 
                 if((mon->count == 0) && (LOCKWORD_READ(&mon->entering) == 0) &&
                                 (mon->in_wait == 0)) {
+                    // 如果count == 0，并且没有别的线程因为该lock而挂起，则将fat lock降低为thin lock
                     TRACE("Thread %p is deflating obj %p...\n", self, obj);
 
                     /* This barrier is not needed for the thin-locking
                        implementation; it's a requirement of the Java
                        memory model. */
                     JMM_UNLOCK_MBARRIER();
-
+					// deflate fat lock to thin lock
                     LOCKWORD_WRITE(&obj->lock, 0);
                     LOCKWORD_COMPARE_AND_SWAP(&mon->entering, 0, UN_USED);
                 }
@@ -526,6 +530,7 @@ void objectWait(Object *obj, long long ms, int ns, int interruptible) {
 
     TRACE("Thread %p Wait on obj %p...\n", self, obj);
 
+	// thin lock，则将其inflate
     if((lockword & SHAPE_BIT) == 0) {
         int tid = (lockword&TID_MASK)>>TID_SHIFT;
         if(tid == self->id) {
@@ -536,6 +541,7 @@ void objectWait(Object *obj, long long ms, int ns, int interruptible) {
         } else
             goto not_owner;
     } else
+    	// fat lock，则继续wait到monitor上
         mon = (Monitor*) (lockword & ~SHAPE_BIT);
 
     if(monitorWait(mon, self, ms, ns, TRUE, interruptible))
