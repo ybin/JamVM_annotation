@@ -18,37 +18,77 @@
  * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
+
+/*
+ * interp-threading.h
+ *
+ * 不论是direct策略还是indirect策略，都有threading形式：
+ * 	1. 普通indirect: 就是基于switch的分发策略
+ * 	2. indirect threading: 基于跳转表的分发策略
+ * 	3. direct threading: 把指令码转换为实际执行的本地码的地址
+ * 	4. 没有non-threading direct形式。
+ *
+ * 无论是direct还是indirect，其threading形式都需要一个跳转表，区别是：
+ * 	indirect threading: 每次执行指令码时读取跳转表
+ * 	direct threading  : 执行之前一次性使用跳转表进行转码，然后执行时不再读表
+ *
+ * 所以，threading其实就是在准备一张表，跳转表，这就是这个header file的全部内容。
+ *
+ */
+
+/////////////////////////// 定义label，即表项(item) ////////////////////////////////////
 /* Two levels of macros are needed to correctly produce the label
    from the OPC_xxx macro passed in opcode as cpp doesn't 
    prescan when concatenating with ##... */
+// 比如： opc_42_0_START, opc_42_0_ENTRY, opc_42_0_END，
+// label：START, ENTRY, END
 #define HNDLR_LBL(opcode, level, label) &&opc##opcode##_##level##_##label
+// 宏L 等价于 HNDLR_LBL
 #define L(opcode, level, label) HNDLR_LBL(opcode, level, label)
 
+/////////////////////////// 定义表名称，即table name ////////////////////////////////////
+// 跳转表的名字，如 handlers_0_START, handlers_0_ENTRY, handlers_0_END
 #define TBL_NAME(level, label) handlers_##level##_##label
 
+// 如果使用cache，会定义三级表handlers_0_XXX, handlers_1_XXX, handlers_2_XXX
 #ifdef USE_CACHE
 #define HNDLR_TBLS(label) TBL_NAME(0,label), TBL_NAME(1,label), \
                           TBL_NAME(2,label)
 #else
+// 否则只使用一级跳转表：handlers_0_XXX
 #define HNDLR_TBLS(label) TBL_NAME(0,label)
 #endif
 
+//////////////////////////// 跳转表的实际定义 //////////////////////////////////////////
+// 如果cache的话，使用三级跳转表
 #ifdef USE_CACHE
 #define DEFINE_HANDLER_TABLES \
     DEF_HANDLER_TABLES(0);    \
     DEF_HANDLER_TABLES(1);    \
     DEF_HANDLER_TABLES(2);
 #else
+// 否则使用一级跳转表
 #define DEFINE_HANDLER_TABLES \
     DEF_HANDLER_TABLES(0);
 #endif
 
+// 如果支持JSR292，就定义相关的表项，其实就是普通表项
 #ifdef JSR292
 #define J(opcode, level, label) L(opcode, level, label)
 #else
+// 否则就不定义相关表项
 #define J(opcode, level, label) &&unused
 #endif
 
+/*
+ * 跳转表的宏定义
+ * 不同的表项使用不同的宏定义：L, I, D, X, J
+ * 	L: label，普通表项
+ * 	I: 留给各个策略自己定义
+ * 	D: 留给各个策略自己定义
+ * 	X: 留给各个策略自己定义
+ * 	J: JSR292, 增加invokedynamic指令，使JVM支持动态语言。
+ */
 #define DEF_HANDLER_TABLE(level,label)               \
     HANDLER_TABLE_T *TBL_NAME(level,label)[] = {     \
         L(OPC_NOP,                    level, label), \

@@ -19,6 +19,11 @@
  * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
+/*
+ * interp-indirect.h中包含两种分发策略：switch-based策略和indirect策略(基于跳转表)
+ * 这两种策略的区分方法就是 THREADED宏。
+ */
+
 #ifdef THREADED
 #include "interp-threading.h"
 

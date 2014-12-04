@@ -39,10 +39,36 @@
 #include "class.h"
 #include "classlib.h"
 
+/*
+ * 这个函数是解释器的重头戏。
+ *
+ * 整个解释器的定义有三大部分：
+ *  1. 宏定义： 用宏来区分各中代码分发策略
+ *  2. 代码主体：也就是这里的executeJava()函数，使用这些宏作代码的实际部署
+ *  3. direct.c, inline.c：这是direct策略和inline策略独有的部分，分别完成
+ *     指令码到内存地址的转换(direct策略)和指令码到本地代码的转换(inline策略)
+ *
+ * 宏定义部分：
+ *  1. 跳转表的定义(interp-threading.h)，这是因为direct threading，indirect threading都会用到
+ *     跳转表，而threading的实际实现也是通过跳转表来完成的，所以把这部分抽出来单独放到一个文件
+ *  2. handler定义，跳转表和handler是配套出现的，handler的定义放到各个策略中自己定义，不同策略
+ *     有不同形式的handler。
+ *
+ * 代码主体部分：
+ * 	该部分见下面的注释。
+ *
+ * direct.c, inline.c部分：
+ * 	待续。。。
+ */
+
 uintptr_t *executeJava() {
 
+///////////////////////////// 定义解释器 //////////////////////////////////////
     /* Definitions specific to the particular
-       interpreter variant */
+       interpreter variant.
+
+       定义解释器特有的部分，如indirect策略的跳转表。
+     */
     INTERPRETER_DEFINITIONS
 
    /* Caching is supported in all variants and
@@ -56,6 +82,13 @@ uintptr_t *executeJava() {
         int64_t l;
     } cache;
 #endif
+
+//////////////////////////// 准备解释器的执行环境 //////////////////////////////////
+
+	/*
+	 * 该部分主要是获取各种资源，比如函数帧(frame)，操作数栈(ostack)，局部变量列表(lvars)，
+	 * 常量池以及(最重要的)函数体(method block)等
+	 */
 
     /* Variable definitions holding the interpreter
        state.  These are common to all interpreter
@@ -74,15 +107,47 @@ uintptr_t *executeJava() {
     CACHED_POLY_OFFSETS
 
     /* Initialise pc to the start of the method.  If it
-       hasn't been executed before it may need preparing */
+       hasn't been executed before it may need preparing.
+
+       对于直接跳转策略，需要首先将“由指令码组成的代码”转换为
+       “由指令码对应的本地代码地址组成的代码”。
+
+       对于间接跳转策略和switch-based策略，该宏定义为空。
+     */
     PREPARE_MB(mb);
     pc = (CodePntr)mb->code;
 
+//////////////////////////// 创建代码分发部分 //////////////////////////////////
+
+    /*
+     * 代码分发共分为三部分开场部分、directive handler部分、谢幕部分。
+     * 三个部分根据不同的分发策略而不同。
+     * 1. 开场部分：创建分发策略相关的环境，如基于switch的分发策略要创建while-switch语句的开始部分；
+     * 2. 为每个directive创建handler
+     * 3. 谢幕部分：分发策略环境的收尾代码，如结束switch语句等。
+     *
+     * 其中第二部分，创建指令的handlers是最最重要的，它是解释器的核心。
+     * 这部分代码很庞大，但是结构相对简单，比如对于switch-based分发策略，就仅仅是一个个的case语句而已。
+     */
+
     /* The initial dispatch code - this is specific to
-       the interpreter variant */
+       the interpreter variant.
+
+	   ################################ Code Dispatch, I - 开场白。################################
+
+	   代码分发的开始部分，如switch-based dispatch的话就是创建
+	   无线循环及switch语句的开始部分。该部分随不同分发策略而不同。
+     */
     INTERPRETER_PROLOGUE
 
-    /* Definitions of the opcode handlers */
+    /* Definitions of the opcode handlers
+     *
+       ################################ Code Dispatch, II - 定义handlers ################################
+     *
+     * 下面是各个directives的handler定义，根据不同的指令分发方式，
+     * 这些handler定义不同，比如有可能是一个个函数，也有可能是
+     * switch语句的一个个case。
+     */
 
 #define MULTI_LEVEL_OPCODES(level)                         \
     DEF_OPC(OPC_ICONST_M1, level,                          \
@@ -368,6 +433,8 @@ uintptr_t *executeJava() {
 #define ZERO_DIVISOR_CHECK_2                               \
     ZERO_DIVISOR_CHECK((int)cache.i.v2);
 
+
+
 #ifdef USE_CACHE
 #define PUSH_0(value, ins_len)                             \
     cache.i.v1 = value;                                    \
@@ -432,6 +499,8 @@ uintptr_t *executeJava() {
 #define RETURN_2                                           \
     *lvars++ = cache.i.v2;                                 \
     goto methodReturn;
+
+
 
 #define GETFIELD_QUICK_0(offset, type)                     \
 {                                                          \
@@ -541,6 +610,10 @@ uintptr_t *executeJava() {
     }
 #endif /* DIRECT */
 
+    /*
+     * 上面是一堆的宏定义，下面才是真正的开始，对于switch-based分发策略来说，
+     * 一个个的handler(即case语句)从下面开始定义。
+     */
     MULTI_LEVEL_OPCODES(0);
 
 #ifdef USE_CACHE
@@ -2569,7 +2642,17 @@ throwException:
 
         DISPATCH_FIRST
     }
+
+    /*
+       ################################ Code Dispatch, III - 结束 ################################
+     *
+     * 简单的结束函数或者switch语句，根据策略不同而不同。
+     */
 #ifndef THREADED
+  /*
+   * 非threaded模式时使用switch-case语句，所以这里两个括号，
+   * 第一个结束switch语句，第二个结束函数。
+   */
   }}
 #endif
 }
